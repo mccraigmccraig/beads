@@ -25,8 +25,9 @@ func TestFederationRemotesAPICheckStates(t *testing.T) {
 	if unreachable.Status != StatusError || !strings.Contains(unreachable.Message, "port 1") {
 		t.Fatalf("unreachable check = %+v, want port error", unreachable)
 	}
-	if !strings.Contains(unreachable.Fix, "bd dolt set remotesapi-port") {
-		t.Fatalf("shared unreachable fix = %q, want bd shared-server guidance", unreachable.Fix)
+	if !strings.Contains(unreachable.Fix, "bd dolt set remotesapi-port") ||
+		!strings.Contains(unreachable.Fix, "bd dolt restart") {
+		t.Fatalf("shared unreachable fix = %q, want configure + fenced restart guidance", unreachable.Fix)
 	}
 	nonShared := federationRemotesAPICheck(state, 1, false)
 	if strings.Contains(nonShared.Fix, "shared") || !strings.Contains(nonShared.Fix, "Dolt sql-server") {

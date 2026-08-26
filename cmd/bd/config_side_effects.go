@@ -31,8 +31,7 @@ func checkConfigSetSideEffects(key, value string) []configSideEffect {
 
 	case key == "dolt.shared-server" && !strings.EqualFold(value, "true"):
 		effects = append(effects, configSideEffect{
-			Message: "Shared server mode disabled. Stop any running server if no longer needed.",
-			Command: "bd dolt stop",
+			Message: "Shared server mode disabled for this workspace. The shared process is left running for other projects; stop it only from a shared-enabled workspace after confirming no users remain.",
 		})
 
 	case key == "dolt.debug" && strings.EqualFold(value, "true"):
@@ -49,8 +48,7 @@ func checkConfigSetSideEffects(key, value string) []configSideEffect {
 
 	case key == "dolt.remotesapi-port":
 		effects = append(effects, configSideEffect{
-			Message: "RemotesAPI port updated. Restart the shared Dolt server to apply it.",
-			Command: "bd dolt restart",
+			Message: "RemotesAPI port updated. From a shared-server-enabled workspace, run 'bd dolt restart' to apply it.",
 		})
 
 	case key == "routing.mode":
@@ -89,8 +87,7 @@ func checkConfigUnsetSideEffects(key string) []configSideEffect {
 
 	case "dolt.shared-server":
 		effects = append(effects, configSideEffect{
-			Message: "Shared server config removed. Stop any running server if no longer needed.",
-			Command: "bd dolt stop",
+			Message: "Shared server config removed from this workspace. The shared process is left running for other projects; stop it only from a shared-enabled workspace after confirming no users remain.",
 		})
 
 	case "dolt.debug":

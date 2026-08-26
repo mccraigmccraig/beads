@@ -330,7 +330,7 @@ func resolveFederationRemotesAPITarget(beadsDir string) (federationRemotesAPITar
 func federationRemotesAPICheck(serverState *doltserver.State, remotesAPIPort int, sharedMode bool) DoctorCheck {
 	configureFix := "Start Dolt sql-server with a remotesapi port"
 	if sharedMode {
-		configureFix = "Run 'bd dolt set remotesapi-port <port>', then restart the shared Dolt server"
+		configureFix = "Run 'bd dolt set remotesapi-port <port>', then run 'bd dolt restart' from a shared-server-enabled workspace"
 	}
 	if remotesAPIPort == 0 {
 		return DoctorCheck{

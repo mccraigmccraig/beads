@@ -377,6 +377,9 @@ func TestSetDoltConfigSharedRemotesAPIPortWritesUserConfig(t *testing.T) {
 	if !strings.Contains(out, config.UserConfigYamlDisplayPath()) {
 		t.Fatalf("shared remotesapi set output must name user-global config, got:\n%s", out)
 	}
+	if !strings.Contains(out, "bd dolt restart") || !strings.Contains(out, "shared-server-enabled workspace") {
+		t.Fatalf("shared remotesapi set output must name supported restart context, got:\n%s", out)
+	}
 	if got := config.GetUserYamlConfig("dolt.remotesapi-port"); got != "8001" {
 		t.Fatalf("user-global remotesapi port = %q, want 8001", got)
 	}
@@ -999,6 +1002,10 @@ func TestDoltRestartModeValidation(t *testing.T) {
 				t.Fatalf("validation error = %v, want containing %q", err, tt.want)
 			}
 		})
+	}
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	if err := validateDoltRestartMode(local, true, false); err != nil {
+		t.Fatalf("explicit restart must remain allowed when auto-start is disabled: %v", err)
 	}
 	if !strings.Contains(doltRestartCmd.Long, "auto-start is disabled") {
 		t.Fatalf("restart help must document explicit lifecycle policy:\n%s", doltRestartCmd.Long)

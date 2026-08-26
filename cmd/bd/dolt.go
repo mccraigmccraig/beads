@@ -2255,7 +2255,7 @@ func setDoltConfig(key, value string, updateConfig bool) error {
 			return nil
 		}
 		fmt.Printf("Set %s = %s (in %s)\n", key, value, location)
-		fmt.Println("Restart the shared Dolt server for this change to take effect.")
+		fmt.Println("From a shared-server-enabled workspace, run 'bd dolt restart' for this change to take effect.")
 		return nil
 
 	case "socket":

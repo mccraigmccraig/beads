@@ -74,6 +74,12 @@ bd config unset jira.url
 
 `bd config set` automatically routes the write to the right location: keys in the YAML namespace (see below) are written to the project `config.yaml`; everything else is written to the Dolt database. `beads.role` is stored in git config.
 
+Machine-global YAML keys are the exception: `metrics.*`, `node_id`, and
+`dolt.remotesapi-port` are written to `~/.config/bd/config.yaml`, never a
+project's tracked `.beads/config.yaml`. The remotesapi setting controls the one
+shared Dolt process on that machine; `BEADS_DOLT_REMOTESAPI_PORT` has highest
+precedence, followed by the user-global value, then the disabled default (`0`).
+
 Unrecognized keys produce a warning with a did-you-mean suggestion; use the `custom.*` namespace for user-defined keys.
 
 ## YAML-only Keys (Startup Settings)
