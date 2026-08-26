@@ -1554,6 +1554,10 @@ func TestDefaultConfig_SharedRemotesAPIPortIsMachineGlobal(t *testing.T) {
 	if got := DefaultConfig(projectBeads).RemotesAPIPort; got != 8001 {
 		t.Fatalf("shared remotesapi port = %d, want user-global 8001 (project metadata must not skew one shared process)", got)
 	}
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "not-a-port")
+	if got := DefaultConfig(projectBeads).RemotesAPIPort; got != 8001 {
+		t.Fatalf("malformed env resolved remotesapi port = %d, want persisted 8001", got)
+	}
 
 	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "9001")
 	if got := DefaultConfig(projectBeads).RemotesAPIPort; got != 9001 {
@@ -1563,6 +1567,13 @@ func TestDefaultConfig_SharedRemotesAPIPortIsMachineGlobal(t *testing.T) {
 	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "0")
 	if got := DefaultConfig(projectBeads).RemotesAPIPort; got != 0 {
 		t.Fatalf("shared remotesapi port = %d, want explicit env disable 0", got)
+	}
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "")
+	if err := config.SetUserYamlConfig(remotesAPIPortConfigKey, "0"); err != nil {
+		t.Fatal(err)
+	}
+	if got := DefaultConfig(projectBeads).RemotesAPIPort; got != 0 {
+		t.Fatalf("persisted shared remotesapi port = %d, want explicit disable 0", got)
 	}
 }
 

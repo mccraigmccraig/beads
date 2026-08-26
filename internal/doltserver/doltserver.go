@@ -868,34 +868,46 @@ func PortSourceLabels() []string {
 
 const remotesAPIPortConfigKey = "dolt.remotesapi-port"
 
-// resolveRemotesAPIPort resolves an explicitly configured remotesapi port.
-// Environment wins everywhere. Shared-server mode then reads the user-global
-// machine config because one process serves every workspace; a project config
-// must not make that shared process vary by whichever repository invokes bd.
-// Per-project managed servers retain the existing metadata.json field and
-// optional project config fallback.
-func resolveRemotesAPIPort(beadsDir string, sharedMode bool) int {
+// ResolveRemotesAPIPort returns the effective remotesapi port. Environment
+// overrides every mode. A shared server then reads its one machine-global
+// value, defaulting to disabled so merely enabling shared-server mode never
+// opens a listener. Non-shared external federation retains the historical
+// configfile default (8080).
+func ResolveRemotesAPIPort(beadsDir string) int {
 	if raw, ok := os.LookupEnv("BEADS_DOLT_REMOTESAPI_PORT"); ok && strings.TrimSpace(raw) != "" {
 		if port, valid := parseOptionalPort(raw); valid {
 			return port
 		}
-		return 0
+		// A malformed override is not an instruction to disable a valid
+		// persisted setting; follow the existing configfile getter convention
+		// and fall through.
 	}
-	if sharedMode {
+	if IsSharedServerMode() {
 		if port, valid := parseOptionalPort(config.GetUserYamlConfig(remotesAPIPortConfigKey)); valid {
 			return port
 		}
 		return 0
 	}
 	if _, err := os.Stat(configfile.ConfigPath(beadsDir)); err == nil {
-		if cfg, loadErr := configfile.Load(beadsDir); loadErr == nil && cfg != nil && cfg.DoltRemotesAPIPort > 0 {
-			return cfg.DoltRemotesAPIPort
+		if cfg, loadErr := configfile.Load(beadsDir); loadErr == nil && cfg != nil {
+			return cfg.GetDoltRemotesAPIPort()
 		}
 	}
-	if port, valid := parseOptionalPort(config.GetStringFromDir(beadsDir, remotesAPIPortConfigKey)); valid {
-		return port
+	return configfile.DefaultDoltRemotesAPIPort
+}
+
+// ProbeRemotesAPI reports whether a local remotesapi listener accepts TCP
+// connections. Unlike ProbeSQLServer there is no MySQL greeting to drain.
+func ProbeRemotesAPI(port int) bool {
+	if port <= 0 {
+		return false
 	}
-	return 0
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 500*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func parseOptionalPort(raw string) (int, bool) {
@@ -929,10 +941,12 @@ func DefaultConfig(beadsDir string) *Config {
 	}
 
 	cfg := &Config{
-		BeadsDir:       beadsDir,
-		Host:           "127.0.0.1",
-		Mode:           ResolveServerMode(beadsDir),
-		RemotesAPIPort: resolveRemotesAPIPort(workspaceBeadsDir, sharedMode),
+		BeadsDir: beadsDir,
+		Host:     "127.0.0.1",
+		Mode:     ResolveServerMode(beadsDir),
+	}
+	if sharedMode {
+		cfg.RemotesAPIPort = ResolveRemotesAPIPort(workspaceBeadsDir)
 	}
 
 	for _, src := range portSources {

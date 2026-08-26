@@ -114,7 +114,9 @@ var doltSetCmd = &cobra.Command{
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	Short:         "Set a Dolt configuration value",
-	Long: `Set a Dolt configuration value in metadata.json.
+	Long: `Set a Dolt configuration value. Most keys are stored in metadata.json.
+remotesapi-port is a machine-global setting for the local shared server and is
+stored in the user config shown by 'bd config get dolt.remotesapi-port'.
 
 Keys:
   database  Database name (default: issue prefix or "beads")
@@ -139,7 +141,8 @@ not land in metadata.json. Use environment variables or the credentials file:
 
   See: bd dolt --help and docs/architecture/dolt.md
 
-Use --update-config to also write to config.yaml for team-wide defaults.
+Use --update-config to also write to project config.yaml for team-wide defaults.
+It is not valid for machine-global remotesapi-port.
 
 Examples:
   bd dolt set database myproject
@@ -1297,17 +1300,20 @@ func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 	}.String()
 
 	result := map[string]interface{}{
-		"mode":               "external",
-		"host":               host,
-		"port":               port,
-		"user":               user,
-		"database":           database,
-		"tls":                tls,
-		"remotesapi_enabled": serverCfg.RemotesAPIPort > 0,
+		"mode":     "external",
+		"host":     host,
+		"port":     port,
+		"user":     user,
+		"database": database,
+		"tls":      tls,
 	}
-	if serverCfg.RemotesAPIPort > 0 {
-		result["remotesapi_port"] = serverCfg.RemotesAPIPort
-		result["remotesapi_reachable"] = testRemotesAPIConnection(serverCfg.RemotesAPIPort)
+	sharedServer := doltserver.IsSharedServerMode()
+	if sharedServer {
+		result["remotesapi_enabled"] = serverCfg.RemotesAPIPort > 0
+		if serverCfg.RemotesAPIPort > 0 {
+			result["remotesapi_port"] = serverCfg.RemotesAPIPort
+			result["remotesapi_reachable"] = doltserver.ProbeRemotesAPI(serverCfg.RemotesAPIPort)
+		}
 	}
 
 	db, openErr := sql.Open("mysql", dsn)
@@ -1355,7 +1361,10 @@ func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 	fmt.Printf("  Database: %s\n", database)
 	fmt.Printf("  User:     %s\n", user)
 	fmt.Printf("  TLS:      %t\n", tls)
-	renderRemotesAPIStatus(serverCfg.RemotesAPIPort, true)
+	if sharedServer {
+		renderRemotesAPIStatus(serverCfg.RemotesAPIPort, true)
+	}
+
 	if version != "" {
 		fmt.Printf("  Version:  %s\n", version)
 	}
@@ -1857,7 +1866,7 @@ func isTimeoutError(err error) bool {
 }
 
 func init() {
-	doltSetCmd.Flags().Bool("update-config", false, "Also write to config.yaml for team-wide defaults")
+	doltSetCmd.Flags().Bool("update-config", false, "Also write to project config.yaml (not valid for machine-global remotesapi-port)")
 	doltStopCmd.Flags().Bool("force", false, "Force stop (proxied recovery still requires a bd/dolt executable match)")
 	doltPushCmd.Flags().Bool("force", false, "Force push (overwrite remote changes)")
 	doltPushCmd.Flags().String("remote", "", "Push to a specific named remote instead of the default")
@@ -1965,18 +1974,6 @@ func resolveDoltShowRemotes(beadsDir string, cfg *configfile.Config, embeddedDat
 	return nil
 }
 
-func testRemotesAPIConnection(port int) bool {
-	if port <= 0 {
-		return false
-	}
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 500*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
-}
-
 func renderRemotesAPIStatus(port int, probe bool) {
 	if port == 0 {
 		fmt.Println("  RemotesAPI: disabled")
@@ -1984,7 +1981,8 @@ func renderRemotesAPIStatus(port int, probe bool) {
 	}
 	fmt.Printf("  RemotesAPI: 127.0.0.1:%d", port)
 	if probe {
-		if testRemotesAPIConnection(port) {
+		if doltserver.ProbeRemotesAPI(port) {
+
 			fmt.Print(" (reachable)")
 		} else {
 			fmt.Print(" (not reachable; restart required after a config change)")
@@ -2034,13 +2032,16 @@ func showDoltConfig(testConnection bool) error {
 				result["user"] = cfg.GetDoltServerUser()
 				result["tls"] = cfg.GetDoltServerTLS()
 				result["shared_server"] = doltserver.IsSharedServerMode()
-				result["remotesapi_enabled"] = dsCfg.RemotesAPIPort > 0
-				if dsCfg.RemotesAPIPort > 0 {
-					result["remotesapi_port"] = dsCfg.RemotesAPIPort
-					if testConnection {
-						result["remotesapi_reachable"] = testRemotesAPIConnection(dsCfg.RemotesAPIPort)
+				if doltserver.IsSharedServerMode() {
+					result["remotesapi_enabled"] = dsCfg.RemotesAPIPort > 0
+					if dsCfg.RemotesAPIPort > 0 {
+						result["remotesapi_port"] = dsCfg.RemotesAPIPort
+						if testConnection {
+							result["remotesapi_reachable"] = doltserver.ProbeRemotesAPI(dsCfg.RemotesAPIPort)
+						}
 					}
 				}
+
 				if testConnection {
 					result["connection_ok"] = testServerConnection(showHost, showPort)
 				}
@@ -2069,7 +2070,9 @@ func showDoltConfig(testConnection bool) error {
 		fmt.Printf("  Port:     %d\n", showPort)
 		fmt.Printf("  User:     %s\n", cfg.GetDoltServerUser())
 		fmt.Printf("  TLS:      %t\n", cfg.GetDoltServerTLS())
-		renderRemotesAPIStatus(dsCfg.RemotesAPIPort, testConnection)
+		if doltserver.IsSharedServerMode() {
+			renderRemotesAPIStatus(dsCfg.RemotesAPIPort, testConnection)
+		}
 		if doltserver.IsSharedServerMode() {
 			fmt.Println("  Mode:     shared server")
 			if sharedDir, err := doltserver.SharedServerDir(); err == nil {
@@ -2159,29 +2162,31 @@ func setDoltConfig(key, value string, updateConfig bool) error {
 		if err != nil || port < 0 || port > 65535 {
 			return HandleError("remotesapi-port must be 0 (disabled) or a valid port number (1-65535)")
 		}
-		if doltserver.IsSharedServerMode() {
-			const configKey = "dolt.remotesapi-port"
-			if err := config.SetUserYamlConfig(configKey, value); err != nil {
-				return HandleError("setting shared-server remotesapi port: %v", err)
+		if !doltserver.IsSharedServerMode() {
+			return HandleError("remotesapi-port configures the local shared Dolt server; enable dolt.shared-server first")
+		}
+		if updateConfig {
+			return HandleError("--update-config is not valid for remotesapi-port; the shared server setting is already machine-global and never written to project config")
+		}
+		const configKey = "dolt.remotesapi-port"
+		if err := config.SetUserYamlConfig(configKey, value); err != nil {
+			return HandleError("setting shared-server remotesapi port: %v", err)
+		}
+		logDoltConfigChange(beadsDir, key, value)
+		location := config.UserConfigYamlDisplayPath()
+		if jsonOutput {
+			if err := outputJSON(map[string]interface{}{
+				"key":      key,
+				"value":    value,
+				"location": location,
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			}
-			logDoltConfigChange(beadsDir, key, value)
-			location := config.UserConfigYamlDisplayPath()
-			if jsonOutput {
-				if err := outputJSON(map[string]interface{}{
-					"key":      key,
-					"value":    value,
-					"location": location,
-				}); err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				}
-				return nil
-			}
-			fmt.Printf("Set %s = %s (in %s)\n", key, value, location)
-			fmt.Println("Restart the shared Dolt server for this change to take effect.")
 			return nil
 		}
-		cfg.DoltRemotesAPIPort = port
-		yamlKey = "dolt.remotesapi-port"
+		fmt.Printf("Set %s = %s (in %s)\n", key, value, location)
+		fmt.Println("Restart the shared Dolt server for this change to take effect.")
+		return nil
 
 	case "socket":
 		// Empty value clears the socket (reverts to TCP host/port).

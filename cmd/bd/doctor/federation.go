@@ -267,30 +267,32 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 		}
 	}
 
-	// Server is running and peers are configured - check if remotesapi port is accessible.
-	// Read port from config instead of hardcoding 8080.
-	remotesAPIPort := configfile.DefaultDoltRemotesAPIPort
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
-		remotesAPIPort = cfg.GetDoltRemotesAPIPort()
-	}
-	host := "127.0.0.1"
+	return federationRemotesAPICheck(serverState, doltserver.ResolveRemotesAPIPort(beadsDir))
+}
 
-	addr := net.JoinHostPort(host, fmt.Sprintf("%d", remotesAPIPort))
-	// Left as a bare dial+close (no doltserver.ProbeSQLServer): remotesapi
-	// speaks gRPC/HTTP, not the MySQL protocol, so there is no handshake
-	// greeting to drain here.
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-	if err != nil {
+func federationRemotesAPICheck(serverState *doltserver.State, remotesAPIPort int) DoctorCheck {
+	if remotesAPIPort == 0 {
+		return DoctorCheck{
+			Name:     "Federation remotesapi",
+			Status:   StatusOK,
+			Message:  "Disabled (not configured)",
+			Category: CategoryFederation,
+		}
+	}
+	if !doltserver.ProbeRemotesAPI(remotesAPIPort) {
+		pid := 0
+		if serverState != nil {
+			pid = serverState.PID
+		}
 		return DoctorCheck{
 			Name:     "Federation remotesapi",
 			Status:   StatusError,
 			Message:  fmt.Sprintf("remotesapi port %d not accessible", remotesAPIPort),
-			Detail:   fmt.Sprintf("Server running (PID %d) but remotesapi port unreachable: %v", serverState.PID, err),
-			Fix:      "Check if dolt sql-server is running with --remotesapi-port flag",
+			Detail:   fmt.Sprintf("Server running (PID %d) but remotesapi port unreachable", pid),
+			Fix:      "Restart the shared Dolt server after configuring remotesapi-port",
 			Category: CategoryFederation,
 		}
 	}
-	_ = conn.Close() // Best effort cleanup
 
 	return DoctorCheck{
 		Name:     "Federation remotesapi",
