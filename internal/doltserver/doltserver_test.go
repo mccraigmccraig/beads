@@ -2072,7 +2072,7 @@ func TestBuildDoltServerArgs(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			args := buildDoltServerArgs(tc.host, tc.port, false, "")
+			args := buildDoltServerArgs(tc.host, tc.port, 0, false, "")
 
 			if len(args) == 0 || args[0] != "sql-server" {
 				t.Fatalf("args[0] = %q, want %q; full args: %v",
@@ -2095,6 +2095,9 @@ func TestBuildDoltServerArgs(t *testing.T) {
 			}
 			if got := args[portIdx+1]; got != tc.wantPort {
 				t.Errorf("port = %q, want %q", got, tc.wantPort)
+			}
+			if indexOf(args, "--remotesapi-port") >= 0 {
+				t.Errorf("disabled remotesapi must not add a flag: %v", args)
 			}
 
 			// --loglevel=<level> — the actual fix.
@@ -2131,7 +2134,7 @@ func TestBuildDoltServerArgs(t *testing.T) {
 // runMain). Placing --prof after sql-server silently drops profiling.
 func TestBuildDoltServerArgs_DebugMode(t *testing.T) {
 	const profDir = "/tmp/test-pprof"
-	args := buildDoltServerArgs("127.0.0.1", 3308, true, profDir)
+	args := buildDoltServerArgs("127.0.0.1", 3308, 0, true, profDir)
 
 	// --prof and --prof-path must precede sql-server.
 	subIdx := indexOf(args, "sql-server")
@@ -2178,7 +2181,7 @@ func TestBuildDoltServerArgs_DebugMode(t *testing.T) {
 // The warning loglevel floor is also reasserted here so a future
 // refactor can't silently degrade only the non-debug path.
 func TestBuildDoltServerArgs_NoDebugFlagsWhenDisabled(t *testing.T) {
-	args := buildDoltServerArgs("127.0.0.1", 3308, false, "")
+	args := buildDoltServerArgs("127.0.0.1", 3308, 0, false, "")
 	if indexOf(args, "--prof") >= 0 {
 		t.Errorf("non-debug args should not contain --prof: %v", args)
 	}
@@ -2194,6 +2197,14 @@ func TestBuildDoltServerArgs_NoDebugFlagsWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestBuildDoltServerArgs_RemotesAPI(t *testing.T) {
+	args := buildDoltServerArgs("127.0.0.1", 3308, 8081, false, "")
+	idx := indexOf(args, "--remotesapi-port")
+	if idx < 0 || idx+1 >= len(args) || args[idx+1] != "8081" {
+		t.Fatalf("configured remotesapi flag missing or wrong: %v", args)
+	}
+}
+
 // TestBuildDoltServerYAMLConfig verifies the --config counterpart to
 // buildDoltServerArgs: it must round-trip through Dolt's own YAML loader
 // with the same host/port/log-level as the CLI-flag form, plus
@@ -2202,7 +2213,7 @@ func TestBuildDoltServerArgs_NoDebugFlagsWhenDisabled(t *testing.T) {
 // caller-resolved value (gastownhall/beads#4986 round 2: --config mode
 // skips Dolt's own .doltcfg discovery, so this must be set explicitly).
 func TestBuildDoltServerYAMLConfig(t *testing.T) {
-	body, err := buildDoltServerYAMLConfig("127.0.0.1", 54321, false, "/tmp/some/.doltcfg")
+	body, err := buildDoltServerYAMLConfig("127.0.0.1", 54321, 8081, false, "/tmp/some/.doltcfg")
 	if err != nil {
 		t.Fatalf("buildDoltServerYAMLConfig: %v", err)
 	}
@@ -2217,6 +2228,10 @@ func TestBuildDoltServerYAMLConfig(t *testing.T) {
 	if got := cfg.Port(); got != 54321 {
 		t.Errorf("Port = %d, want %d", got, 54321)
 	}
+	if got := cfg.RemotesapiPort(); got == nil || *got != 8081 {
+		t.Errorf("RemotesapiPort = %v, want 8081", got)
+	}
+
 	if got := string(cfg.LogLevel()); got != doltServerLogLevel {
 		t.Errorf("LogLevel = %q, want %q", got, doltServerLogLevel)
 	}
@@ -2240,7 +2255,7 @@ func TestBuildDoltServerYAMLConfig(t *testing.T) {
 // YAML config's log level the same way buildDoltServerArgs does for the
 // CLI-flag form.
 func TestBuildDoltServerYAMLConfig_DebugLogLevel(t *testing.T) {
-	body, err := buildDoltServerYAMLConfig("127.0.0.1", 54321, true, "/tmp/some/.doltcfg")
+	body, err := buildDoltServerYAMLConfig("127.0.0.1", 54321, 0, true, "/tmp/some/.doltcfg")
 	if err != nil {
 		t.Fatalf("buildDoltServerYAMLConfig: %v", err)
 	}

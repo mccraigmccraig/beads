@@ -390,10 +390,11 @@ type Config struct {
 
 // State holds runtime information about a managed server.
 type State struct {
-	Running bool   `json:"running"`
-	PID     int    `json:"pid"`
-	Port    int    `json:"port"`
-	DataDir string `json:"data_dir"`
+	Running        bool   `json:"running"`
+	PID            int    `json:"pid"`
+	Port           int    `json:"port"`
+	RemotesAPIPort int    `json:"remotesapi_port,omitempty"`
+	DataDir        string `json:"data_dir"`
 }
 
 // file paths within .beads/
@@ -1163,11 +1164,13 @@ func IsRunning(beadsDir string) (*State, error) {
 		_ = os.Remove(pidPath(beadsDir))
 		return &State{Running: false}, nil
 	}
+	cfg := DefaultConfig(beadsDir)
 	return &State{
-		Running: true,
-		PID:     pid,
-		Port:    port,
-		DataDir: ResolveDoltDir(beadsDir),
+		Running:        true,
+		PID:            pid,
+		Port:           port,
+		RemotesAPIPort: cfg.RemotesAPIPort,
+		DataDir:        ResolveDoltDir(beadsDir),
 	}, nil
 }
 
@@ -1297,7 +1300,7 @@ func ServerSpawnEnv() []string {
 // Debug mode also raises --loglevel from the default warning to debug;
 // the connection-log spam concern that motivated the warning floor is
 // the price of opting into debug.
-func buildDoltServerArgs(host string, port int, debug bool, profDir string) []string {
+func buildDoltServerArgs(host string, port, remotesAPIPort int, debug bool, profDir string) []string {
 	var args []string
 	if debug {
 		args = append(args, "--prof", "cpu", "--prof-path", profDir)
@@ -1307,6 +1310,9 @@ func buildDoltServerArgs(host string, port int, debug bool, profDir string) []st
 		"-H", host,
 		"-P", strconv.Itoa(port),
 	)
+	if remotesAPIPort > 0 {
+		args = append(args, "--remotesapi-port", strconv.Itoa(remotesAPIPort))
+	}
 	if debug {
 		args = append(args, "--loglevel=debug")
 	} else {
@@ -1428,7 +1434,7 @@ func resolveCfgDir(doltDir string) (string, error) {
 // this field, and Dolt's YAML loader uses yaml.UnmarshalStrict, so an
 // unrecognized key is a hard parse error at server startup, not a
 // silently-ignored one.
-func buildDoltServerYAMLConfig(host string, port int, debug bool, cfgDir string) ([]byte, error) {
+func buildDoltServerYAMLConfig(host string, port, remotesAPIPort int, debug bool, cfgDir string) ([]byte, error) {
 	logLevel := doltServerLogLevel
 	if debug {
 		logLevel = "debug"
@@ -1446,6 +1452,9 @@ func buildDoltServerYAMLConfig(host string, port int, debug bool, cfgDir string)
 				ArchiveLevel_: &archiveLevel,
 			},
 		},
+	}
+	if remotesAPIPort > 0 {
+		yc.RemotesapiConfig.Port_ = &remotesAPIPort
 	}
 	return yaml.Marshal(yc)
 }
@@ -1466,44 +1475,39 @@ func buildDoltServerArgsWithConfig(configPath string, debug bool, profDir string
 	return args
 }
 
+func acquireLifecycleLock(beadsDir string) (*os.File, error) {
+	lockF, err := os.OpenFile(lockPath(beadsDir), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("creating lifecycle lock: %w", err)
+	}
+	if err := lockfile.FlockExclusiveBlocking(lockF); err != nil {
+		_ = lockF.Close()
+		return nil, fmt.Errorf("acquiring lifecycle lock: %w", err)
+	}
+	return lockF, nil
+}
+
+func releaseLifecycleLock(lockF *os.File) {
+	_ = lockfile.FlockUnlock(lockF)
+	_ = lockF.Close()
+}
+
 // Start explicitly starts a dolt sql-server for the project.
 // Returns the State of the started server, or an error.
 func Start(beadsDir string) (*State, error) {
+	lockF, err := acquireLifecycleLock(beadsDir)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseLifecycleLock(lockF)
+	return startLocked(beadsDir)
+}
+
+func startLocked(beadsDir string) (*State, error) {
 	cfg := DefaultConfig(beadsDir)
 	doltDir := ResolveDoltDir(beadsDir)
 
-	// Acquire exclusive lock to prevent concurrent starts
-	lockF, err := os.OpenFile(lockPath(beadsDir), os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		return nil, fmt.Errorf("creating lock file: %w", err)
-	}
-	defer lockF.Close()
-
-	if err := lockfile.FlockExclusiveNonBlocking(lockF); err != nil {
-		if lockfile.IsLocked(err) {
-			// Another bd process is starting the server — wait for it
-			if err := lockfile.FlockExclusiveBlocking(lockF); err != nil {
-				return nil, fmt.Errorf("waiting for server start lock: %w", err)
-			}
-			defer func() { _ = lockfile.FlockUnlock(lockF) }()
-
-			// Lock acquired — check if server is now running
-			state, err := IsRunning(beadsDir)
-			if err != nil {
-				return nil, err
-			}
-			if state.Running {
-				return state, nil
-			}
-			// Still not running — fall through to start it ourselves
-		} else {
-			return nil, fmt.Errorf("acquiring start lock: %w", err)
-		}
-	} else {
-		defer func() { _ = lockfile.FlockUnlock(lockF) }()
-	}
-
-	// Re-check after acquiring lock (double-check pattern)
+	// Re-check after acquiring the lifecycle lock.
 	if state, _ := IsRunning(beadsDir); state != nil && state.Running {
 		return state, nil
 	}
@@ -1631,7 +1635,7 @@ func Start(beadsDir string) (*State, error) {
 
 			var cmdArgs []string
 			if useArchiveLevelConfig {
-				cfgBody, cfgErr := buildDoltServerYAMLConfig(cfg.Host, actualPort, debug, cfgDir)
+				cfgBody, cfgErr := buildDoltServerYAMLConfig(cfg.Host, actualPort, cfg.RemotesAPIPort, debug, cfgDir)
 				if cfgErr != nil {
 					lastErr = fmt.Errorf("rendering managed sql-server config: %w", cfgErr)
 					if !explicitPort {
@@ -1660,7 +1664,7 @@ func Start(beadsDir string) (*State, error) {
 				}
 				cmdArgs = buildDoltServerArgsWithConfig(absConfigPath, debug, profDir)
 			} else {
-				cmdArgs = buildDoltServerArgs(cfg.Host, actualPort, debug, profDir)
+				cmdArgs = buildDoltServerArgs(cfg.Host, actualPort, cfg.RemotesAPIPort, debug, profDir)
 			}
 
 			cmd := exec.Command(doltBin, cmdArgs...) //nolint:gosec // doltBin is resolved from PATH, not user input
@@ -1749,12 +1753,22 @@ func Start(beadsDir string) (*State, error) {
 		return nil, fmt.Errorf("server started (PID %d) but not accepting connections on port %d: %w\nCheck logs: %s",
 			pid, actualPort, err, logPath(beadsDir))
 	}
+	if err := waitForRemotesAPI(cfg.RemotesAPIPort, readyTimeout()); err != nil {
+		if proc, findErr := os.FindProcess(pid); findErr == nil {
+			_ = proc.Kill()
+		}
+		_ = os.Remove(pidPath(beadsDir))
+		_ = os.Remove(portPath(beadsDir))
+		return nil, fmt.Errorf("server started (PID %d) but remotesapi is not accepting connections on port %d: %w\nCheck logs: %s",
+			pid, cfg.RemotesAPIPort, err, logPath(beadsDir))
+	}
 
 	return &State{
-		Running: true,
-		PID:     pid,
-		Port:    actualPort,
-		DataDir: doltDir,
+		Running:        true,
+		PID:            pid,
+		Port:           actualPort,
+		RemotesAPIPort: cfg.RemotesAPIPort,
+		DataDir:        doltDir,
 	}, nil
 }
 
@@ -1893,8 +1907,64 @@ func Stop(beadsDir string) error {
 	return StopWithForce(beadsDir, false)
 }
 
+// Restart gracefully replaces a managed server while holding the lifecycle
+// lock for the entire stop/start transition. The live SQL port is restored as
+// desired state so a per-project ephemeral server does not move merely because
+// it was restarted.
+func Restart(beadsDir string) (*State, error) {
+	lockF, err := acquireLifecycleLock(beadsDir)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseLifecycleLock(lockF)
+
+	previousPort := 0
+	if state, stateErr := IsRunning(beadsDir); stateErr == nil && state != nil {
+		previousPort = state.Port
+	}
+	if err := stopLocked(beadsDir); err != nil && !errors.Is(err, ErrServerNotRunning) {
+		return nil, fmt.Errorf("stopping Dolt server for restart: %w", err)
+	}
+	if previousPort > 0 {
+		if err := EnsurePortFile(beadsDir, previousPort); err != nil {
+			return nil, fmt.Errorf("restoring SQL port %d for restart: %w", previousPort, err)
+		}
+	}
+	state, err := startLocked(beadsDir)
+	if err != nil {
+		var restoreErr error
+		if previousPort > 0 {
+			restoreErr = EnsurePortFile(beadsDir, previousPort)
+		}
+		restartErr := fmt.Errorf("restarting Dolt server (server remains stopped; check %s): %w", logPath(beadsDir), err)
+		if restoreErr != nil {
+			return nil, errors.Join(restartErr, fmt.Errorf("restoring SQL port %d after failed restart: %w", previousPort, restoreErr))
+		}
+		return nil, restartErr
+	}
+	return state, nil
+}
+
 // StopWithForce is like Stop but with an optional force flag.
 func StopWithForce(beadsDir string, force bool) error {
+	// Preserve the established idempotent stopped contract (including
+	// ErrServerNotRunning joined with cleanup errors) without requiring a new
+	// lock file in a directory that may itself be unwritable.
+	if state, err := IsRunning(beadsDir); err != nil {
+		return err
+	} else if state == nil || !state.Running {
+		return stopLocked(beadsDir)
+	}
+
+	lockF, err := acquireLifecycleLock(beadsDir)
+	if err != nil {
+		return err
+	}
+	defer releaseLifecycleLock(lockF)
+	return stopLocked(beadsDir)
+}
+
+func stopLocked(beadsDir string) error {
 	state, err := IsRunning(beadsDir)
 	if err != nil {
 		return err
@@ -2097,6 +2167,20 @@ func waitForReady(host string, port int, timeout time.Duration) error {
 	}
 
 	return fmt.Errorf("timeout after %s waiting for server at %s", timeout, addr)
+}
+
+func waitForRemotesAPI(port int, timeout time.Duration) error {
+	if port <= 0 {
+		return nil
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if ProbeRemotesAPI(port) {
+			return nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout after %s waiting for remotesapi at 127.0.0.1:%d", timeout, port)
 }
 
 // ensureDoltIdentity sets dolt global user identity from git config if not already set.
