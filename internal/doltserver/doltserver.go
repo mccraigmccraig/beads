@@ -1205,6 +1205,11 @@ func EnsureRunning(beadsDir string) (int, error) {
 // servers (e.g. test teardown) should use this variant.
 func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err error) {
 	serverDir := resolveServerDir(beadsDir)
+	lockF, lockErr := acquireLifecycleLock(serverDir)
+	if lockErr != nil {
+		return 0, false, lockErr
+	}
+	defer releaseLifecycleLock(lockF)
 
 	// Inform when an orchestrator is also running on this machine
 	if IsSharedServerMode() && os.Getenv("GT_ROOT") != "" {
@@ -1216,6 +1221,10 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 		return 0, false, err
 	}
 	if state.Running {
+		state, err = verifyRemotesAPIState(DefaultConfig(serverDir), state)
+		if err != nil {
+			return 0, false, err
+		}
 		_ = EnsurePortFile(serverDir, state.Port)
 		return state.Port, false, nil
 	}
@@ -1263,7 +1272,7 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 			"  To check status: bd dolt status", cfg.Port)
 	}
 
-	s, err := Start(serverDir)
+	s, err := startLocked(serverDir)
 	if err != nil {
 		return 0, false, err
 	}
@@ -1503,8 +1512,18 @@ func releaseLifecycleLock(lockF *os.File) {
 	_ = lockF.Close()
 }
 
+func validateDistinctServerPorts(sqlPort, remotesAPIPort int) error {
+	if remotesAPIPort > 0 && remotesAPIPort == sqlPort {
+		return fmt.Errorf("configured remotesapi port %d equals SQL port %d; choose distinct ports", remotesAPIPort, sqlPort)
+	}
+	return nil
+}
+
 func verifyRemotesAPIState(cfg *Config, state *State) (*State, error) {
 	state.RemotesAPIPort = cfg.RemotesAPIPort
+	if err := validateDistinctServerPorts(state.Port, cfg.RemotesAPIPort); err != nil {
+		return nil, fmt.Errorf("%w and run 'bd dolt restart'", err)
+	}
 	if cfg.RemotesAPIPort > 0 && !ProbeRemotesAPI(cfg.RemotesAPIPort) {
 		return nil, fmt.Errorf(
 			"Dolt server is running on SQL port %d, but configured remotesapi port %d is not reachable; run 'bd dolt restart' to apply the shared-server setting",
@@ -1649,6 +1668,13 @@ func startLocked(beadsDir string) (*State, error) {
 			return nil, err
 		}
 
+		if explicitPort {
+			if err := validateDistinctServerPorts(actualPort, cfg.RemotesAPIPort); err != nil {
+				_ = logFile.Close()
+				return nil, err
+			}
+		}
+
 		// Start dolt sql-server, with retry loop for ephemeral port TOCTOU.
 		pid = 0
 		lastErr = nil
@@ -1662,6 +1688,10 @@ func startLocked(beadsDir string) (*State, error) {
 				p, allocErr := allocateEphemeralPort(cfg.Host)
 				if allocErr != nil {
 					lastErr = allocErr
+					continue
+				}
+				if err := validateDistinctServerPorts(p, cfg.RemotesAPIPort); err != nil {
+					lastErr = err
 					continue
 				}
 				actualPort = p

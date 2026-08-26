@@ -785,6 +785,49 @@ func TestStopWaitsForLifecycleLockWhenStopped(t *testing.T) {
 	}
 }
 
+func TestEnsureRunningDetailedWaitsForLifecycleLock(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+
+	dir := t.TempDir()
+	cfg := configfile.DefaultConfig()
+	cfg.Backend = configfile.BackendDolt
+	cfg.DoltMode = configfile.DoltModeServer
+	cfg.DoltServerPort = 1
+	if err := cfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	lockF, err := acquireLifecycleLock(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := EnsureRunningDetailed(dir)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		releaseLifecycleLock(lockF)
+		t.Fatalf("EnsureRunningDetailed returned while lifecycle lock was held: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	releaseLifecycleLock(lockF)
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("EnsureRunningDetailed unexpectedly succeeded against disabled external server")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("EnsureRunningDetailed did not resume after lifecycle lock release")
+	}
+}
+
 // TestStopNotRunningWithCleanupError verifies that Stop returns both the
 // sentinel and cleanup errors when the server is not running but state
 // files can't be removed.
@@ -2258,6 +2301,13 @@ func TestBuildDoltServerArgs_RemotesAPI(t *testing.T) {
 }
 
 func TestVerifyRemotesAPIState(t *testing.T) {
+	if _, err := verifyRemotesAPIState(
+		&Config{RemotesAPIPort: 3308},
+		&State{Running: true, PID: 41, Port: 3308},
+	); err == nil || !strings.Contains(err.Error(), "distinct") {
+		t.Fatalf("equal SQL/remotesapi verification = %v, want distinct-port error", err)
+	}
+
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
