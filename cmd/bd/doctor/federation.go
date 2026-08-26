@@ -29,17 +29,33 @@ func doltDatabaseName(beadsDir string) string {
 // connection settings from beads configuration. This ensures federation checks
 // use the configured host/port rather than falling back to defaults.
 func doltServerConfig(beadsDir, doltPath string) *dolt.Config {
+	sharedMode := doltserver.IsSharedServerMode()
+	return doltServerConfigForTarget(
+		beadsDir,
+		doltPath,
+		doltserver.DefaultConfigForMode(beadsDir, sharedMode),
+		sharedMode,
+	)
+}
+
+func doltServerConfigForTarget(
+	beadsDir, doltPath string,
+	resolved *doltserver.Config,
+	sharedMode bool,
+) *dolt.Config {
 	cfg := &dolt.Config{
-		Path:     doltPath,
-		ReadOnly: true,
-		Database: doltDatabaseName(beadsDir),
+		Path:                   doltPath,
+		ReadOnly:               true,
+		Database:               doltDatabaseName(beadsDir),
+		ServerHost:             resolved.Host,
+		ServerPort:             resolved.Port,
+		ServerPortSource:       resolved.PortSource,
+		ServerPortSharedServer: resolved.PortSharedServer,
 	}
 	if bcfg, err := configfile.Load(beadsDir); err == nil && bcfg != nil {
-		cfg.ServerHost = bcfg.GetDoltServerHost()
-		// Carries PortSource with the port: this cfg reaches applyConfigDefaults,
-		// which reads a sourceless port as caller-explicit (see
-		// dolt.ApplyResolvedServerPort).
-		dolt.ApplyResolvedServerPort(beadsDir, cfg)
+		if !sharedMode {
+			cfg.ServerHost = bcfg.GetDoltServerHost()
+		}
 		cfg.ServerUser = bcfg.GetDoltServerUser()
 		cfg.ServerTLS = bcfg.GetDoltServerTLS()
 		cfg.ServerPassword = bcfg.GetDoltServerPasswordForPort(cfg.ServerPort)
@@ -187,9 +203,17 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 		}
 	}
 
-	// Check if dolt directory exists
-	doltPath := getDatabasePath(beadsDir)
-	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
+	target, targetErr := resolveFederationRemotesAPITarget(beadsDir)
+	if targetErr != nil {
+		return DoctorCheck{
+			Name:     "Federation remotesapi",
+			Status:   StatusError,
+			Message:  "Cannot resolve target Dolt server",
+			Detail:   targetErr.Error(),
+			Category: CategoryFederation,
+		}
+	}
+	if _, err := os.Stat(target.DoltPath); os.IsNotExist(err) {
 		return DoctorCheck{
 			Name:     "Federation remotesapi",
 			Status:   StatusOK,
@@ -198,16 +222,13 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 		}
 	}
 
-	// Check if dolt server is running using doltserver.IsRunning which
-	// correctly resolves PID file paths (in beadsDir, not doltPath)
-	// and handles orchestrator daemon PID files.
-	serverState, _ := doltserver.IsRunning(beadsDir)
+	serverState, _ := doltserver.IsRunning(target.ServerDir)
 	serverRunning := serverState != nil && serverState.Running
 
 	if !serverRunning {
 		// No server running - check if we have remotes configured
 		ctx := context.Background()
-		store, err := dolt.New(ctx, doltServerConfig(beadsDir, doltPath))
+		store, err := dolt.New(ctx, target.SQLConfig)
 		if err != nil {
 			return DoctorCheck{
 				Name:     "Federation remotesapi",
@@ -243,7 +264,7 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 	// probing the remotesapi port. Without peers, remotesapi is irrelevant.
 	{
 		ctx := context.Background()
-		store, err := dolt.New(ctx, doltServerConfig(beadsDir, doltPath))
+		store, err := dolt.New(ctx, target.SQLConfig)
 		if err == nil {
 			remotes, err := store.ListRemotes(ctx)
 			_ = store.Close()
@@ -267,30 +288,74 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 		}
 	}
 
-	// Server is running and peers are configured - check if remotesapi port is accessible.
-	// Read port from config instead of hardcoding 8080.
-	remotesAPIPort := configfile.DefaultDoltRemotesAPIPort
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
-		remotesAPIPort = cfg.GetDoltRemotesAPIPort()
-	}
-	host := "127.0.0.1"
+	return federationRemotesAPICheck(serverState, target.RemotesAPIPort, target.SharedMode)
+}
 
-	addr := net.JoinHostPort(host, fmt.Sprintf("%d", remotesAPIPort))
-	// Left as a bare dial+close (no doltserver.ProbeSQLServer): remotesapi
-	// speaks gRPC/HTTP, not the MySQL protocol, so there is no handshake
-	// greeting to drain here.
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-	if err != nil {
+type federationRemotesAPITarget struct {
+	SharedMode     bool
+	DoltPath       string
+	ServerDir      string
+	SQLConfig      *dolt.Config
+	RemotesAPIPort int
+}
+
+func resolveFederationRemotesAPITarget(beadsDir string) (federationRemotesAPITarget, error) {
+	sharedMode := doltserver.IsSharedServerModeForDir(beadsDir)
+	doltPath := getDatabasePath(beadsDir)
+	serverDir := beadsDir
+	if sharedMode {
+		var err error
+		doltPath, err = doltserver.SharedDoltPath()
+		if err != nil {
+			return federationRemotesAPITarget{}, fmt.Errorf("resolving shared Dolt path: %w", err)
+		}
+		serverDir, err = doltserver.SharedServerPath()
+		if err != nil {
+			return federationRemotesAPITarget{}, fmt.Errorf("resolving shared server path: %w", err)
+		}
+	}
+	resolvedServer := doltserver.DefaultConfigForMode(beadsDir, sharedMode)
+	sqlConfig := doltServerConfigForTarget(beadsDir, doltPath, resolvedServer, sharedMode)
+	sqlConfig.AutoStart = false
+	sqlConfig.DisableAutoStart = true
+	return federationRemotesAPITarget{
+		SharedMode:     sharedMode,
+		DoltPath:       doltPath,
+		ServerDir:      serverDir,
+		SQLConfig:      sqlConfig,
+		RemotesAPIPort: doltserver.ResolveRemotesAPIPortForMode(beadsDir, sharedMode),
+	}, nil
+}
+
+func federationRemotesAPICheck(serverState *doltserver.State, remotesAPIPort int, sharedMode bool) DoctorCheck {
+	configureFix := "Start Dolt sql-server with a remotesapi port"
+	if sharedMode {
+		configureFix = "Run 'bd dolt set remotesapi-port <port>', then run 'bd dolt restart' from a shared-server-enabled workspace"
+	}
+	if remotesAPIPort == 0 {
+		return DoctorCheck{
+			Name:     "Federation remotesapi",
+			Status:   StatusError,
+			Message:  "Disabled while federation peers are configured",
+			Detail:   "Peer sync requires a remotesapi listener",
+			Fix:      configureFix,
+			Category: CategoryFederation,
+		}
+	}
+	if !doltserver.ProbeRemotesAPI(remotesAPIPort) {
+		pid := 0
+		if serverState != nil {
+			pid = serverState.PID
+		}
 		return DoctorCheck{
 			Name:     "Federation remotesapi",
 			Status:   StatusError,
 			Message:  fmt.Sprintf("remotesapi port %d not accessible", remotesAPIPort),
-			Detail:   fmt.Sprintf("Server running (PID %d) but remotesapi port unreachable: %v", serverState.PID, err),
-			Fix:      "Check if dolt sql-server is running with --remotesapi-port flag",
+			Detail:   fmt.Sprintf("Server running (PID %d) but remotesapi port unreachable", pid),
+			Fix:      configureFix,
 			Category: CategoryFederation,
 		}
 	}
-	_ = conn.Close() // Best effort cleanup
 
 	return DoctorCheck{
 		Name:     "Federation remotesapi",
