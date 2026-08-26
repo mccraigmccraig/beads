@@ -729,7 +729,11 @@ func RestorePortFile(beadsDir string, snap PortFileSnapshot) error {
 }
 
 func configYamlPort(beadsDir string) int {
-	path := filepath.Join(ResolveDoltDir(beadsDir), "config.yaml")
+	return configYamlPortAtDoltDir(ResolveDoltDir(beadsDir))
+}
+
+func configYamlPortAtDoltDir(doltDir string) int {
+	path := filepath.Join(doltDir, "config.yaml")
 	if _, err := os.Stat(path); err != nil {
 		return 0
 	}
@@ -892,6 +896,65 @@ func PortSourceLabels() []string {
 	return labels
 }
 
+func resolveServerPortForMode(workspaceBeadsDir, serverDir string, sharedMode, skipPortFile bool) (int, PortSource) {
+	if raw := strings.TrimSpace(os.Getenv("BEADS_DOLT_SERVER_PORT")); raw != "" {
+		if port, err := strconv.Atoi(raw); err == nil && port > 0 {
+			return port, PortSourceEnv
+		}
+	}
+	if !skipPortFile {
+		if port := readPortFile(serverDir); port > 0 {
+			return port, PortSourcePortFile
+		}
+	}
+
+	doltDir := projectDoltDirPath(workspaceBeadsDir)
+	if sharedMode {
+		if sharedDoltDir, err := SharedDoltPath(); err == nil {
+			doltDir = sharedDoltDir
+		}
+	}
+	if port := configYamlPortAtDoltDir(doltDir); port > 0 {
+		return port, PortSourceDoltConfigYaml
+	}
+
+	if !sharedMode {
+		if raw := strings.TrimSpace(config.GetStringFromDir(workspaceBeadsDir, "dolt.port")); raw != "" {
+			if port, err := strconv.Atoi(raw); err == nil && port > 0 {
+				return port, PortSourceConfigYaml
+			}
+		}
+	}
+	if raw := strings.TrimSpace(config.GetUserYamlConfig("dolt.port")); raw != "" {
+		if port, err := strconv.Atoi(raw); err == nil && port > 0 {
+			return port, PortSourceConfigYaml
+		}
+	}
+
+	metadataDir := workspaceBeadsDir
+	if sharedMode {
+		metadataDir = serverDir
+	}
+	if cfg, err := configfile.Load(metadataDir); err == nil && cfg != nil && cfg.DoltServerPort > 0 {
+		return cfg.DoltServerPort, PortSourceMetadataJSON
+	}
+	return 0, PortSourceUnset
+}
+
+type serverPortResolver func(workspaceBeadsDir, serverDir string, sharedMode, skipPortFile bool) (int, PortSource)
+
+func resolveServerPortFromActiveSources(_ string, serverDir string, sharedMode, skipPortFile bool) (int, PortSource) {
+	for _, src := range portSources {
+		if skipPortFile && src.source == PortSourcePortFile {
+			continue
+		}
+		if port, ok := src.resolve(serverDir); ok {
+			return port, src.source
+		}
+	}
+	return 0, PortSourceUnset
+}
+
 const remotesAPIPortConfigKey = "dolt.remotesapi-port"
 
 // ResolveRemotesAPIPort returns the effective port for a target workspace.
@@ -961,13 +1024,17 @@ func parseOptionalPort(raw string) (int, bool) {
 // The port file (dolt-server.port) is written by Start() with the actual
 // listening port, so already-running-server connections use the right port.
 func DefaultConfig(beadsDir string) *Config {
-	return DefaultConfigForMode(beadsDir, IsSharedServerMode())
+	return defaultConfigForMode(beadsDir, IsSharedServerMode(), resolveServerPortFromActiveSources)
 }
 
 // DefaultConfigForMode resolves server configuration for an already-classified
 // target. Diagnostics use this when inspecting a workspace other than the
 // active one so process-global mode cannot change its data/state/port paths.
 func DefaultConfigForMode(beadsDir string, sharedMode bool) *Config {
+	return defaultConfigForMode(beadsDir, sharedMode, resolveServerPortForMode)
+}
+
+func defaultConfigForMode(beadsDir string, sharedMode bool, resolvePort serverPortResolver) *Config {
 	workspaceBeadsDir := beadsDir
 	if sharedMode {
 		if sharedDir, err := SharedServerDir(); err == nil {
@@ -987,14 +1054,8 @@ func DefaultConfigForMode(beadsDir string, sharedMode bool) *Config {
 	if sharedMode {
 		cfg.RemotesAPIPort = ResolveRemotesAPIPortForMode(workspaceBeadsDir, true)
 	}
-	for _, src := range portSources {
-		if port, ok := src.resolve(beadsDir); ok {
-			cfg.Port = port
-			cfg.PortSource = src.source
-			cfg.PortSharedServer = sharedMode
-			break
-		}
-	}
+	cfg.Port, cfg.PortSource = resolvePort(workspaceBeadsDir, beadsDir, sharedMode, false)
+	cfg.PortSharedServer = sharedMode
 
 	// Port 0 means "no configured port". In shared mode, use the fixed
 	// shared server port. In per-project mode, Start() will allocate an
@@ -1034,19 +1095,8 @@ func DefaultConfigForMode(beadsDir string, sharedMode bool) *Config {
 			// lower-priority authoritative sources (listener.port,
 			// dolt.port, metadata dolt_server_port) still apply.
 			if cfg.PortSource == PortSourcePortFile {
-				cfg.Port = 0
-				cfg.PortSource = PortSourceUnset
-				for _, src := range portSources {
-					if src.source == PortSourcePortFile {
-						continue
-					}
-					if port, ok := src.resolve(beadsDir); ok {
-						cfg.Port = port
-						cfg.PortSource = src.source
-						cfg.PortSharedServer = sharedMode
-						break
-					}
-				}
+				cfg.Port, cfg.PortSource = resolvePort(workspaceBeadsDir, beadsDir, false, true)
+				cfg.PortSharedServer = false
 			}
 			// With no configured port, dial the documented default
 			// 3307, not :0 — there is no local Start() to allocate

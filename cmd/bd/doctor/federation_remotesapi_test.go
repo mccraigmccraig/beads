@@ -57,12 +57,21 @@ func TestResolveFederationRemotesAPITargetUsesTargetPaths(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(sharedRoot, "dolt"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(sharedRoot, "dolt-server.port"), []byte("14444\n"), 0o600); err != nil {
+	activeDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(activeDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(activeDir, "config.yaml"),
+		[]byte("dolt:\n  shared-server: false\n  port: 16666\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", activeDir)
 	config.ResetForTesting()
 	t.Cleanup(config.ResetForTesting)
 	if err := config.SetUserYamlConfig("dolt.remotesapi-port", "8123"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Initialize(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -89,8 +98,9 @@ func TestResolveFederationRemotesAPITargetUsesTargetPaths(t *testing.T) {
 		nonShared.DoltPath != wantNonSharedData ||
 		nonShared.ServerDir != nonSharedDir ||
 		nonShared.SQLConfig.ServerPort != 15555 ||
+		nonShared.SQLConfig.ServerPortSharedServer ||
 		nonShared.RemotesAPIPort != 7001 {
-		t.Fatalf("non-shared target = %+v, want data:%q state:%q sql:15555 rapi:7001", nonShared, wantNonSharedData, nonSharedDir)
+		t.Fatalf("non-shared target = %+v, want data:%q state:%q sql:15555 shared-provenance:false rapi:7001", nonShared, wantNonSharedData, nonSharedDir)
 	}
 
 	sharedDir := filepath.Join(t.TempDir(), ".beads")
@@ -110,8 +120,9 @@ func TestResolveFederationRemotesAPITargetUsesTargetPaths(t *testing.T) {
 	if !shared.SharedMode ||
 		shared.DoltPath != filepath.Join(sharedRoot, "dolt") ||
 		shared.ServerDir != sharedRoot ||
-		shared.SQLConfig.ServerPort != 14444 ||
+		shared.SQLConfig.ServerPort != doltserver.DefaultSharedServerPort ||
+		!shared.SQLConfig.ServerPortSharedServer ||
 		shared.RemotesAPIPort != 8123 {
-		t.Fatalf("shared target = %+v, want data:%q state:%q sql:14444 rapi:8123", shared, filepath.Join(sharedRoot, "dolt"), sharedRoot)
+		t.Fatalf("shared target = %+v, want data:%q state:%q sql:%d shared-provenance:true rapi:8123", shared, filepath.Join(sharedRoot, "dolt"), sharedRoot, doltserver.DefaultSharedServerPort)
 	}
 }

@@ -44,12 +44,13 @@ func doltServerConfigForTarget(
 	sharedMode bool,
 ) *dolt.Config {
 	cfg := &dolt.Config{
-		Path:             doltPath,
-		ReadOnly:         true,
-		Database:         doltDatabaseName(beadsDir),
-		ServerHost:       resolved.Host,
-		ServerPort:       resolved.Port,
-		ServerPortSource: resolved.PortSource,
+		Path:                   doltPath,
+		ReadOnly:               true,
+		Database:               doltDatabaseName(beadsDir),
+		ServerHost:             resolved.Host,
+		ServerPort:             resolved.Port,
+		ServerPortSource:       resolved.PortSource,
+		ServerPortSharedServer: resolved.PortSharedServer,
 	}
 	if bcfg, err := configfile.Load(beadsDir); err == nil && bcfg != nil {
 		if !sharedMode {
