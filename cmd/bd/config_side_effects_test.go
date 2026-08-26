@@ -133,6 +133,15 @@ func TestCheckConfigUnsetSideEffects_SharedServer(t *testing.T) {
 	}
 }
 
+func TestCheckConfigUnsetSideEffects_DoltRemotesAPIPort(t *testing.T) {
+	effects := checkConfigUnsetSideEffects("dolt.remotesapi-port")
+	if len(effects) != 1 || effects[0].Command != "" ||
+		!strings.Contains(effects[0].Message, "bd dolt restart") ||
+		!strings.Contains(effects[0].Message, "shared-server-enabled workspace") {
+		t.Fatalf("remotesapi unset side effect = %+v, want contextual fenced restart", effects)
+	}
+}
+
 func TestCheckConfigUnsetSideEffects_BackupEnabled(t *testing.T) {
 	effects := checkConfigUnsetSideEffects("backup.enabled")
 	if len(effects) != 1 {

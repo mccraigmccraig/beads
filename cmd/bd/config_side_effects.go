@@ -96,6 +96,11 @@ func checkConfigUnsetSideEffects(key string) []configSideEffect {
 			Command: "bd dolt restart",
 		})
 
+	case "dolt.remotesapi-port":
+		effects = append(effects, configSideEffect{
+			Message: "RemotesAPI disabled. From a shared-server-enabled workspace, run 'bd dolt restart' to close the existing listener.",
+		})
+
 	case "backup.enabled":
 		effects = append(effects, configSideEffect{
 			Message: "Backup config removed. Automatic backups will no longer run.",
