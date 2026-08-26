@@ -138,6 +138,8 @@ func TestDoltShowConfigServerMode(t *testing.T) {
 	cfg.DoltServerHost = "192.168.1.100"
 	cfg.DoltServerPort = 3308
 	cfg.DoltServerUser = "testuser"
+	cfg.DoltRemotesAPIPort = 9090
+
 	if err := cfg.Save(beadsDir); err != nil {
 		t.Fatalf("failed to save config: %v", err)
 	}
@@ -174,6 +176,10 @@ func TestDoltShowConfigServerMode(t *testing.T) {
 		if !containsAny(output, "testuser", "User") {
 			t.Errorf("output should show user: %s", output)
 		}
+		if !strings.Contains(output, "RemotesAPI: 127.0.0.1:9090") {
+			t.Errorf("output should show configured remotesapi port: %s", output)
+		}
+
 	})
 
 	t.Run("json output", func(t *testing.T) {
@@ -202,6 +208,13 @@ func TestDoltShowConfigServerMode(t *testing.T) {
 		if result["user"] != "testuser" {
 			t.Errorf("expected user 'testuser', got %v", result["user"])
 		}
+		if enabled, ok := result["remotesapi_enabled"].(bool); !ok || !enabled {
+			t.Errorf("expected remotesapi_enabled=true, got %v", result["remotesapi_enabled"])
+		}
+		if port, ok := result["remotesapi_port"].(float64); !ok || int(port) != 9090 {
+			t.Errorf("expected remotesapi_port 9090, got %v", result["remotesapi_port"])
+		}
+
 	})
 }
 
@@ -278,6 +291,45 @@ func TestDoltSetConfigValidation(t *testing.T) {
 			t.Errorf("expected user 'admin', got %s", loadedCfg.DoltServerUser)
 		}
 	})
+}
+func TestSetDoltConfigSharedRemotesAPIPortWritesUserConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "")
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := configfile.DefaultConfig()
+	cfg.Backend = configfile.BackendDolt
+	cfg.DoltMode = configfile.DoltModeServer
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	out := captureDoltSetOutput(t, "remotesapi-port", "8001", false)
+	if !strings.Contains(out, config.UserConfigYamlDisplayPath()) {
+		t.Fatalf("shared remotesapi set output must name user-global config, got:\n%s", out)
+	}
+	if got := config.GetUserYamlConfig("dolt.remotesapi-port"); got != "8001" {
+		t.Fatalf("user-global remotesapi port = %q, want 8001", got)
+	}
+	loaded, err := configfile.Load(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.DoltRemotesAPIPort != 0 {
+		t.Fatalf("project metadata remotesapi port = %d, want untouched 0", loaded.DoltRemotesAPIPort)
+	}
+	if got := doltserver.DefaultConfig(beadsDir).RemotesAPIPort; got != 8001 {
+		t.Fatalf("resolved shared remotesapi port = %d, want 8001", got)
+	}
 }
 
 func TestDoltSetConfigJSONOutput(t *testing.T) {
@@ -1472,6 +1524,7 @@ func TestIsLocalHost(t *testing.T) {
 func TestRunExternalDoltStatus_Unreachable(t *testing.T) {
 	// Force the resolved port to 1 (guaranteed unreachable on loopback).
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "2")
 
 	beadsDir := t.TempDir()
 	// Use 127.0.0.1 so the OS RSTs the connect() fast (connection refused)
@@ -1503,6 +1556,9 @@ func TestRunExternalDoltStatus_Unreachable(t *testing.T) {
 			"TLS:",
 			"true",
 			"Error:",
+			"RemotesAPI:",
+			"127.0.0.1:2",
+			"not reachable",
 		} {
 			if !strings.Contains(out, want) {
 				t.Errorf("expected output to contain %q, got:\n%s", want, out)
@@ -1539,6 +1595,15 @@ func TestRunExternalDoltStatus_Unreachable(t *testing.T) {
 		}
 		if result["tls"] != true {
 			t.Errorf("tls = %v, want true", result["tls"])
+		}
+		if result["remotesapi_enabled"] != true {
+			t.Errorf("remotesapi_enabled = %v, want true", result["remotesapi_enabled"])
+		}
+		if port, ok := result["remotesapi_port"].(float64); !ok || int(port) != 2 {
+			t.Errorf("remotesapi_port = %v, want 2", result["remotesapi_port"])
+		}
+		if result["remotesapi_reachable"] != false {
+			t.Errorf("remotesapi_reachable = %v, want false", result["remotesapi_reachable"])
 		}
 		if _, ok := result["error"]; !ok {
 			t.Error("expected 'error' field in JSON output for unreachable server")

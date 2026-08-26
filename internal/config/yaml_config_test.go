@@ -1426,3 +1426,9 @@ func TestMetricsNoticeShownResolvesUserGlobalOnly(t *testing.T) {
 		}
 	})
 }
+
+func TestDoltRemotesAPIPortIsUserGlobal(t *testing.T) {
+	if !IsUserGlobalKey("dolt.remotesapi-port") {
+		t.Fatal("dolt.remotesapi-port must be machine-global; a project config cannot vary one shared server")
+	}
+}

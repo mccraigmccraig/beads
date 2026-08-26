@@ -336,6 +336,10 @@ type Config struct {
 	Port     int        // MySQL protocol port (0 = allocate ephemeral port on Start)
 	Host     string     // Bind address (default: 127.0.0.1)
 	Mode     ServerMode // Server ownership mode (Owned, External, Embedded)
+	// RemotesAPIPort is the configured Dolt remotesapi listener. Zero means
+	// disabled. Unlike the SQL port, bd never assigns this implicitly: opening a
+	// network replication endpoint must be an explicit operator decision.
+	RemotesAPIPort int
 
 	// PortSource records which step of the precedence chain (see
 	// portSources) resolved Port. PortSourceUnset when Port == 0. Callers
@@ -862,6 +866,50 @@ func PortSourceLabels() []string {
 	return labels
 }
 
+const remotesAPIPortConfigKey = "dolt.remotesapi-port"
+
+// resolveRemotesAPIPort resolves an explicitly configured remotesapi port.
+// Environment wins everywhere. Shared-server mode then reads the user-global
+// machine config because one process serves every workspace; a project config
+// must not make that shared process vary by whichever repository invokes bd.
+// Per-project managed servers retain the existing metadata.json field and
+// optional project config fallback.
+func resolveRemotesAPIPort(beadsDir string, sharedMode bool) int {
+	if raw, ok := os.LookupEnv("BEADS_DOLT_REMOTESAPI_PORT"); ok && strings.TrimSpace(raw) != "" {
+		if port, valid := parseOptionalPort(raw); valid {
+			return port
+		}
+		return 0
+	}
+	if sharedMode {
+		if port, valid := parseOptionalPort(config.GetUserYamlConfig(remotesAPIPortConfigKey)); valid {
+			return port
+		}
+		return 0
+	}
+	if _, err := os.Stat(configfile.ConfigPath(beadsDir)); err == nil {
+		if cfg, loadErr := configfile.Load(beadsDir); loadErr == nil && cfg != nil && cfg.DoltRemotesAPIPort > 0 {
+			return cfg.DoltRemotesAPIPort
+		}
+	}
+	if port, valid := parseOptionalPort(config.GetStringFromDir(beadsDir, remotesAPIPortConfigKey)); valid {
+		return port
+	}
+	return 0
+}
+
+func parseOptionalPort(raw string) (int, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, false
+	}
+	port, err := strconv.Atoi(raw)
+	if err != nil || port < 0 || port > 65535 {
+		return 0, false
+	}
+	return port, true
+}
+
 // DefaultConfig returns config with sensible defaults. Port resolution walks
 // portSources in priority order (see PortSourceLabels) and returns port 0
 // when no source provides one, meaning Start() should allocate an ephemeral
@@ -870,6 +918,7 @@ func PortSourceLabels() []string {
 // The port file (dolt-server.port) is written by Start() with the actual
 // listening port, so already-running-server connections use the right port.
 func DefaultConfig(beadsDir string) *Config {
+	workspaceBeadsDir := beadsDir
 	// In shared mode, use the shared server directory for port resolution
 	sharedMode := false
 	if IsSharedServerMode() {
@@ -880,9 +929,10 @@ func DefaultConfig(beadsDir string) *Config {
 	}
 
 	cfg := &Config{
-		BeadsDir: beadsDir,
-		Host:     "127.0.0.1",
-		Mode:     ResolveServerMode(beadsDir),
+		BeadsDir:       beadsDir,
+		Host:           "127.0.0.1",
+		Mode:           ResolveServerMode(beadsDir),
+		RemotesAPIPort: resolveRemotesAPIPort(workspaceBeadsDir, sharedMode),
 	}
 
 	for _, src := range portSources {

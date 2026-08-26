@@ -1519,6 +1519,68 @@ func TestDefaultConfig_SharedModeFixedPort(t *testing.T) {
 		t.Errorf("shared mode: expected port %d (DefaultSharedServerPort), got %d", DefaultSharedServerPort, cfg.Port)
 	}
 }
+func TestDefaultConfig_SharedRemotesAPIPortIsMachineGlobal(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("BEADS_SHARED_SERVER_DIR", filepath.Join(home, ".beads", "shared-server"))
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "")
+
+	projectBeads := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(projectBeads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projectCfg := configfile.DefaultConfig()
+	projectCfg.DoltRemotesAPIPort = 7001
+	if err := projectCfg.Save(projectBeads); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SetUserYamlConfig(remotesAPIPortConfigKey, "8001"); err != nil {
+		t.Fatal(err)
+	}
+	configPath, err := config.UserConfigYamlPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configBody, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := config.GetUserYamlConfig(remotesAPIPortConfigKey); got != "8001" {
+		t.Fatalf("user-global config %s contains %q but resolved remotesapi port = %q, want 8001", configPath, configBody, got)
+	}
+
+	if got := DefaultConfig(projectBeads).RemotesAPIPort; got != 8001 {
+		t.Fatalf("shared remotesapi port = %d, want user-global 8001 (project metadata must not skew one shared process)", got)
+	}
+
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "9001")
+	if got := DefaultConfig(projectBeads).RemotesAPIPort; got != 9001 {
+		t.Fatalf("shared remotesapi port = %d, want env override 9001", got)
+	}
+
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "0")
+	if got := DefaultConfig(projectBeads).RemotesAPIPort; got != 0 {
+		t.Fatalf("shared remotesapi port = %d, want explicit env disable 0", got)
+	}
+}
+
+func TestDefaultConfig_RemotesAPIPortDisabledByDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "")
+
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := DefaultConfig(beadsDir).RemotesAPIPort; got != 0 {
+		t.Fatalf("unconfigured remotesapi port = %d, want disabled 0", got)
+	}
+}
 
 func TestDefaultConfig_SharedModeGeneralPortOverrides(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
