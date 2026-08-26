@@ -457,10 +457,10 @@ func yamlScalarString(v interface{}) (string, bool) {
 // GetUserYamlConfig reads a single dotted key from the user-global config.yaml
 // ONLY, never project/BEADS_DIR config, returning "" if unset. It is the read
 // counterpart of SetUserYamlConfig/UnsetUserYamlConfig and the generic form of
-// the per-key consent helpers below. User-global keys (see IsUserGlobalKey —
-// currently metrics.*) must be read through this so `bd config get` reports the
-// value that actually governs runtime behavior, not the merged value a project's
-// .beads/config.yaml could shadow.
+// per-key consent helpers below. Keys selected by IsUserGlobalKey (for example
+// metrics.*, node_id, and the shared-server remotesapi port) must be read
+// through this so `bd config get` reports the value that actually governs
+// runtime behavior, not a merged project value the machine ignores.
 func GetUserYamlConfig(key string) string {
 	raw, _ := readUserGlobalYamlValue(key)
 	return strings.TrimSpace(raw)

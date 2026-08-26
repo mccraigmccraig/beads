@@ -121,6 +121,29 @@ func IsSharedServerMode() bool {
 	return config.GetBool("dolt.shared-server")
 }
 
+// IsSharedServerModeForDir resolves shared-server mode for a diagnostic target.
+// An explicit target config wins over the process-global active workspace;
+// otherwise commands operating on their active workspace retain the normal
+// environment/merged-config behavior.
+func IsSharedServerModeForDir(beadsDir string) bool {
+	if raw := strings.TrimSpace(config.GetStringFromDir(beadsDir, "dolt.shared-server")); raw != "" {
+		enabled, err := strconv.ParseBool(raw)
+		return err == nil && enabled
+	}
+	return IsSharedServerMode()
+}
+
+// ResolveServerDirForTarget returns the state directory belonging to a
+// diagnostic target rather than whichever workspace launched the process.
+func ResolveServerDirForTarget(beadsDir string) string {
+	if IsSharedServerModeForDir(beadsDir) {
+		if dir, err := SharedServerDir(); err == nil {
+			return dir
+		}
+	}
+	return beadsDir
+}
+
 func IsDebugMode() bool {
 	if v := os.Getenv("BEADS_DOLT_DEBUG"); v == "1" || strings.EqualFold(v, "true") {
 		return true
@@ -868,12 +891,17 @@ func PortSourceLabels() []string {
 
 const remotesAPIPortConfigKey = "dolt.remotesapi-port"
 
-// ResolveRemotesAPIPort returns the effective remotesapi port. Environment
-// overrides every mode. A shared server then reads its one machine-global
-// value, defaulting to disabled so merely enabling shared-server mode never
-// opens a listener. Non-shared external federation retains the historical
-// configfile default (8080).
+// ResolveRemotesAPIPort returns the effective port for a target workspace.
 func ResolveRemotesAPIPort(beadsDir string) int {
+	return ResolveRemotesAPIPortForMode(beadsDir, IsSharedServerModeForDir(beadsDir))
+}
+
+// ResolveRemotesAPIPortForMode resolves the effective remotesapi port for an
+// already-classified target. Environment overrides every mode. A shared server
+// then reads its one machine-global value, defaulting to disabled so merely
+// enabling shared-server mode never opens a listener. Non-shared external
+// federation retains the historical configfile default (8080).
+func ResolveRemotesAPIPortForMode(beadsDir string, sharedMode bool) int {
 	if raw, ok := os.LookupEnv("BEADS_DOLT_REMOTESAPI_PORT"); ok && strings.TrimSpace(raw) != "" {
 		if port, valid := parseOptionalPort(raw); valid {
 			return port
@@ -882,7 +910,7 @@ func ResolveRemotesAPIPort(beadsDir string) int {
 		// persisted setting; follow the existing configfile getter convention
 		// and fall through.
 	}
-	if IsSharedServerMode() {
+	if sharedMode {
 		if port, valid := parseOptionalPort(config.GetUserYamlConfig(remotesAPIPortConfigKey)); valid {
 			return port
 		}
@@ -946,9 +974,8 @@ func DefaultConfig(beadsDir string) *Config {
 		Mode:     ResolveServerMode(beadsDir),
 	}
 	if sharedMode {
-		cfg.RemotesAPIPort = ResolveRemotesAPIPort(workspaceBeadsDir)
+		cfg.RemotesAPIPort = ResolveRemotesAPIPortForMode(workspaceBeadsDir, true)
 	}
-
 	for _, src := range portSources {
 		if port, ok := src.resolve(beadsDir); ok {
 			cfg.Port = port

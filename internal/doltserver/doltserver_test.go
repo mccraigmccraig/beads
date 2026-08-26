@@ -1536,6 +1536,10 @@ func TestDefaultConfig_SharedRemotesAPIPortIsMachineGlobal(t *testing.T) {
 	if err := projectCfg.Save(projectBeads); err != nil {
 		t.Fatal(err)
 	}
+	if got := DefaultConfig(projectBeads).RemotesAPIPort; got != 0 {
+		t.Fatalf("shared remotesapi port = %d with no user-global value, want disabled 0 despite project metadata 7001", got)
+	}
+
 	if err := config.SetUserYamlConfig(remotesAPIPortConfigKey, "8001"); err != nil {
 		t.Fatal(err)
 	}

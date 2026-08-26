@@ -198,10 +198,11 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 		}
 	}
 
-	// Check if dolt server is running using doltserver.IsRunning which
-	// correctly resolves PID file paths (in beadsDir, not doltPath)
-	// and handles orchestrator daemon PID files.
-	serverState, _ := doltserver.IsRunning(beadsDir)
+	// Resolve lifecycle/config state from the TARGET workspace. A shared
+	// target's PID lives in the machine shared-server directory, not project
+	// .beads, and its explicit mode must not inherit the caller's workspace.
+	sharedMode, serverDir, remotesAPIPort := federationRemotesAPITarget(beadsDir)
+	serverState, _ := doltserver.IsRunning(serverDir)
 	serverRunning := serverState != nil && serverState.Running
 
 	if !serverRunning {
@@ -267,15 +268,28 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 		}
 	}
 
-	return federationRemotesAPICheck(serverState, doltserver.ResolveRemotesAPIPort(beadsDir))
+	return federationRemotesAPICheck(serverState, remotesAPIPort, sharedMode)
 }
 
-func federationRemotesAPICheck(serverState *doltserver.State, remotesAPIPort int) DoctorCheck {
+func federationRemotesAPITarget(beadsDir string) (sharedMode bool, serverDir string, remotesAPIPort int) {
+	sharedMode = doltserver.IsSharedServerModeForDir(beadsDir)
+	serverDir = doltserver.ResolveServerDirForTarget(beadsDir)
+	remotesAPIPort = doltserver.ResolveRemotesAPIPortForMode(beadsDir, sharedMode)
+	return sharedMode, serverDir, remotesAPIPort
+}
+
+func federationRemotesAPICheck(serverState *doltserver.State, remotesAPIPort int, sharedMode bool) DoctorCheck {
+	configureFix := "Start Dolt sql-server with a remotesapi port"
+	if sharedMode {
+		configureFix = "Run 'bd dolt set remotesapi-port <port>', then restart the shared Dolt server"
+	}
 	if remotesAPIPort == 0 {
 		return DoctorCheck{
 			Name:     "Federation remotesapi",
-			Status:   StatusOK,
-			Message:  "Disabled (not configured)",
+			Status:   StatusError,
+			Message:  "Disabled while federation peers are configured",
+			Detail:   "Peer sync requires a remotesapi listener",
+			Fix:      configureFix,
 			Category: CategoryFederation,
 		}
 	}
@@ -289,7 +303,7 @@ func federationRemotesAPICheck(serverState *doltserver.State, remotesAPIPort int
 			Status:   StatusError,
 			Message:  fmt.Sprintf("remotesapi port %d not accessible", remotesAPIPort),
 			Detail:   fmt.Sprintf("Server running (PID %d) but remotesapi port unreachable", pid),
-			Fix:      "Restart the shared Dolt server after configuring remotesapi-port",
+			Fix:      configureFix,
 			Category: CategoryFederation,
 		}
 	}
