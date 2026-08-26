@@ -1519,6 +1519,58 @@ func TestDefaultConfig_SharedModeFixedPort(t *testing.T) {
 		t.Errorf("shared mode: expected port %d (DefaultSharedServerPort), got %d", DefaultSharedServerPort, cfg.Port)
 	}
 }
+func TestIsSharedServerModeForDirPrecedence(t *testing.T) {
+	writeMode := func(t *testing.T, value string) string {
+		t.Helper()
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+			[]byte("dolt:\n  shared-server: "+value+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return beadsDir
+	}
+
+	t.Run("environment overrides target", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+		if !IsSharedServerModeForDir(writeMode(t, "false")) {
+			t.Fatal("BEADS_DOLT_SHARED_SERVER=1 must override target shared-server=false")
+		}
+	})
+
+	t.Run("target overrides active workspace", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+		activeDir := writeMode(t, "true")
+		targetDir := writeMode(t, "false")
+		t.Setenv("BEADS_DIR", activeDir)
+		config.ResetForTesting()
+		t.Cleanup(config.ResetForTesting)
+		if err := config.Initialize(); err != nil {
+			t.Fatal(err)
+		}
+		if IsSharedServerModeForDir(targetDir) {
+			t.Fatal("explicit target shared-server=false must override active workspace true")
+		}
+	})
+
+	t.Run("target true overrides active workspace", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+		activeDir := writeMode(t, "false")
+		targetDir := writeMode(t, "true")
+		t.Setenv("BEADS_DIR", activeDir)
+		config.ResetForTesting()
+		t.Cleanup(config.ResetForTesting)
+		if err := config.Initialize(); err != nil {
+			t.Fatal(err)
+		}
+		if !IsSharedServerModeForDir(targetDir) {
+			t.Fatal("explicit target shared-server=true must override active workspace false")
+		}
+	})
+}
+
 func TestDefaultConfig_SharedRemotesAPIPortIsMachineGlobal(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

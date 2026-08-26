@@ -45,12 +45,21 @@ func TestFederationRemotesAPICheckStates(t *testing.T) {
 	}
 }
 
-func TestFederationRemotesAPITargetUsesTargetMode(t *testing.T) {
+func TestResolveFederationRemotesAPITargetUsesTargetPaths(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	t.Setenv("BEADS_SHARED_SERVER_DIR", filepath.Join(home, ".beads", "shared-server"))
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "")
+	sharedRoot := filepath.Join(home, ".beads", "shared-server")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedRoot)
+	if err := os.MkdirAll(filepath.Join(sharedRoot, "dolt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sharedRoot, "dolt-server.port"), []byte("14444\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	config.ResetForTesting()
 	t.Cleanup(config.ResetForTesting)
 	if err := config.SetUserYamlConfig("dolt.remotesapi-port", "8123"); err != nil {
@@ -65,16 +74,23 @@ func TestFederationRemotesAPITargetUsesTargetMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	nonSharedCfg := configfile.DefaultConfig()
+	nonSharedCfg.DoltMode = configfile.DoltModeServer
+	nonSharedCfg.DoltServerPort = 15555
 	nonSharedCfg.DoltRemotesAPIPort = 7001
 	if err := nonSharedCfg.Save(nonSharedDir); err != nil {
 		t.Fatal(err)
 	}
-
-	// The current process says shared; the explicit non-shared target must win.
-	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
-	shared, serverDir, port := federationRemotesAPITarget(nonSharedDir)
-	if shared || serverDir != nonSharedDir || port != 7001 {
-		t.Fatalf("non-shared target = shared:%v dir:%q port:%d, want false/%q/7001", shared, serverDir, port, nonSharedDir)
+	nonShared, err := resolveFederationRemotesAPITarget(nonSharedDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNonSharedData := filepath.Join(nonSharedDir, "dolt")
+	if nonShared.SharedMode ||
+		nonShared.DoltPath != wantNonSharedData ||
+		nonShared.ServerDir != nonSharedDir ||
+		nonShared.SQLConfig.ServerPort != 15555 ||
+		nonShared.RemotesAPIPort != 7001 {
+		t.Fatalf("non-shared target = %+v, want data:%q state:%q sql:15555 rapi:7001", nonShared, wantNonSharedData, nonSharedDir)
 	}
 
 	sharedDir := filepath.Join(t.TempDir(), ".beads")
@@ -84,15 +100,18 @@ func TestFederationRemotesAPITargetUsesTargetMode(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(sharedDir, "config.yaml"), []byte("dolt:\n  shared-server: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
-	// The current process says non-shared; the explicit shared target must win.
-	t.Setenv("BEADS_DOLT_SHARED_SERVER", "0")
-	shared, serverDir, port = federationRemotesAPITarget(sharedDir)
-	wantServerDir, err := doltserver.SharedServerDir()
+	shared, err := resolveFederationRemotesAPITarget(sharedDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !shared || serverDir != wantServerDir || port != 8123 {
-		t.Fatalf("shared target = shared:%v dir:%q port:%d, want true/%q/8123", shared, serverDir, port, wantServerDir)
+	if _, err := os.Stat(filepath.Join(sharedDir, "dolt")); !os.IsNotExist(err) {
+		t.Fatalf("precondition: shared project unexpectedly has local dolt dir: %v", err)
+	}
+	if !shared.SharedMode ||
+		shared.DoltPath != filepath.Join(sharedRoot, "dolt") ||
+		shared.ServerDir != sharedRoot ||
+		shared.SQLConfig.ServerPort != 14444 ||
+		shared.RemotesAPIPort != 8123 {
+		t.Fatalf("shared target = %+v, want data:%q state:%q sql:14444 rapi:8123", shared, filepath.Join(sharedRoot, "dolt"), sharedRoot)
 	}
 }

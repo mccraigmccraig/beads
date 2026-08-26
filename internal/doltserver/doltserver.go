@@ -122,22 +122,25 @@ func IsSharedServerMode() bool {
 }
 
 // IsSharedServerModeForDir resolves shared-server mode for a diagnostic target.
-// An explicit target config wins over the process-global active workspace;
-// otherwise commands operating on their active workspace retain the normal
-// environment/merged-config behavior.
+// A process environment override remains authoritative. Otherwise an explicit
+// target config wins over the active workspace's merged config.
 func IsSharedServerModeForDir(beadsDir string) bool {
+	if raw, ok := os.LookupEnv("BEADS_DOLT_SHARED_SERVER"); ok && strings.TrimSpace(raw) != "" {
+		enabled, err := strconv.ParseBool(strings.TrimSpace(raw))
+		return err == nil && enabled
+	}
 	if raw := strings.TrimSpace(config.GetStringFromDir(beadsDir, "dolt.shared-server")); raw != "" {
 		enabled, err := strconv.ParseBool(raw)
 		return err == nil && enabled
 	}
-	return IsSharedServerMode()
+	return config.GetBool("dolt.shared-server")
 }
 
 // ResolveServerDirForTarget returns the state directory belonging to a
 // diagnostic target rather than whichever workspace launched the process.
 func ResolveServerDirForTarget(beadsDir string) string {
 	if IsSharedServerModeForDir(beadsDir) {
-		if dir, err := SharedServerDir(); err == nil {
+		if dir, err := SharedServerPath(); err == nil {
 			return dir
 		}
 	}
@@ -958,20 +961,28 @@ func parseOptionalPort(raw string) (int, bool) {
 // The port file (dolt-server.port) is written by Start() with the actual
 // listening port, so already-running-server connections use the right port.
 func DefaultConfig(beadsDir string) *Config {
+	return DefaultConfigForMode(beadsDir, IsSharedServerMode())
+}
+
+// DefaultConfigForMode resolves server configuration for an already-classified
+// target. Diagnostics use this when inspecting a workspace other than the
+// active one so process-global mode cannot change its data/state/port paths.
+func DefaultConfigForMode(beadsDir string, sharedMode bool) *Config {
 	workspaceBeadsDir := beadsDir
-	// In shared mode, use the shared server directory for port resolution
-	sharedMode := false
-	if IsSharedServerMode() {
+	if sharedMode {
 		if sharedDir, err := SharedServerDir(); err == nil {
 			beadsDir = sharedDir
-			sharedMode = true
 		}
 	}
 
+	mode := ResolveServerMode(workspaceBeadsDir)
+	if sharedMode {
+		mode = ServerModeExternal
+	}
 	cfg := &Config{
 		BeadsDir: beadsDir,
 		Host:     "127.0.0.1",
-		Mode:     ResolveServerMode(beadsDir),
+		Mode:     mode,
 	}
 	if sharedMode {
 		cfg.RemotesAPIPort = ResolveRemotesAPIPortForMode(workspaceBeadsDir, true)
@@ -988,7 +999,7 @@ func DefaultConfig(beadsDir string) *Config {
 	// Port 0 means "no configured port". In shared mode, use the fixed
 	// shared server port. In per-project mode, Start() will allocate an
 	// ephemeral port from the OS (GH#2098, GH#2372).
-	if cfg.Port == 0 && IsSharedServerMode() {
+	if cfg.Port == 0 && sharedMode {
 		cfg.Port = DefaultSharedServerPort // 3308 - avoids orchestrator conflict on 3307
 		cfg.PortSource = PortSourceSharedServerDefault
 		cfg.PortSharedServer = true
@@ -996,10 +1007,10 @@ func DefaultConfig(beadsDir string) *Config {
 
 	// Host-inferred external config (GH#3545): the server lives on
 	// another machine.
-	if cfg.Mode == ServerModeExternal {
+	if cfg.Mode == ServerModeExternal && !sharedMode {
 		fc := &configfile.Config{}
-		if _, err := os.Stat(configfile.ConfigPath(beadsDir)); err == nil {
-			if loaded, loadErr := configfile.Load(beadsDir); loadErr == nil && loaded != nil {
+		if _, err := os.Stat(configfile.ConfigPath(workspaceBeadsDir)); err == nil {
+			if loaded, loadErr := configfile.Load(workspaceBeadsDir); loadErr == nil && loaded != nil {
 				fc = loaded
 			}
 		}

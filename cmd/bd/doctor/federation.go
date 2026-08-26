@@ -29,17 +29,32 @@ func doltDatabaseName(beadsDir string) string {
 // connection settings from beads configuration. This ensures federation checks
 // use the configured host/port rather than falling back to defaults.
 func doltServerConfig(beadsDir, doltPath string) *dolt.Config {
+	sharedMode := doltserver.IsSharedServerMode()
+	return doltServerConfigForTarget(
+		beadsDir,
+		doltPath,
+		doltserver.DefaultConfigForMode(beadsDir, sharedMode),
+		sharedMode,
+	)
+}
+
+func doltServerConfigForTarget(
+	beadsDir, doltPath string,
+	resolved *doltserver.Config,
+	sharedMode bool,
+) *dolt.Config {
 	cfg := &dolt.Config{
-		Path:     doltPath,
-		ReadOnly: true,
-		Database: doltDatabaseName(beadsDir),
+		Path:             doltPath,
+		ReadOnly:         true,
+		Database:         doltDatabaseName(beadsDir),
+		ServerHost:       resolved.Host,
+		ServerPort:       resolved.Port,
+		ServerPortSource: resolved.PortSource,
 	}
 	if bcfg, err := configfile.Load(beadsDir); err == nil && bcfg != nil {
-		cfg.ServerHost = bcfg.GetDoltServerHost()
-		// Carries PortSource with the port: this cfg reaches applyConfigDefaults,
-		// which reads a sourceless port as caller-explicit (see
-		// dolt.ApplyResolvedServerPort).
-		dolt.ApplyResolvedServerPort(beadsDir, cfg)
+		if !sharedMode {
+			cfg.ServerHost = bcfg.GetDoltServerHost()
+		}
 		cfg.ServerUser = bcfg.GetDoltServerUser()
 		cfg.ServerTLS = bcfg.GetDoltServerTLS()
 		cfg.ServerPassword = bcfg.GetDoltServerPasswordForPort(cfg.ServerPort)
@@ -187,9 +202,17 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 		}
 	}
 
-	// Check if dolt directory exists
-	doltPath := getDatabasePath(beadsDir)
-	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
+	target, targetErr := resolveFederationRemotesAPITarget(beadsDir)
+	if targetErr != nil {
+		return DoctorCheck{
+			Name:     "Federation remotesapi",
+			Status:   StatusError,
+			Message:  "Cannot resolve target Dolt server",
+			Detail:   targetErr.Error(),
+			Category: CategoryFederation,
+		}
+	}
+	if _, err := os.Stat(target.DoltPath); os.IsNotExist(err) {
 		return DoctorCheck{
 			Name:     "Federation remotesapi",
 			Status:   StatusOK,
@@ -198,17 +221,13 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 		}
 	}
 
-	// Resolve lifecycle/config state from the TARGET workspace. A shared
-	// target's PID lives in the machine shared-server directory, not project
-	// .beads, and its explicit mode must not inherit the caller's workspace.
-	sharedMode, serverDir, remotesAPIPort := federationRemotesAPITarget(beadsDir)
-	serverState, _ := doltserver.IsRunning(serverDir)
+	serverState, _ := doltserver.IsRunning(target.ServerDir)
 	serverRunning := serverState != nil && serverState.Running
 
 	if !serverRunning {
 		// No server running - check if we have remotes configured
 		ctx := context.Background()
-		store, err := dolt.New(ctx, doltServerConfig(beadsDir, doltPath))
+		store, err := dolt.New(ctx, target.SQLConfig)
 		if err != nil {
 			return DoctorCheck{
 				Name:     "Federation remotesapi",
@@ -244,7 +263,7 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 	// probing the remotesapi port. Without peers, remotesapi is irrelevant.
 	{
 		ctx := context.Background()
-		store, err := dolt.New(ctx, doltServerConfig(beadsDir, doltPath))
+		store, err := dolt.New(ctx, target.SQLConfig)
 		if err == nil {
 			remotes, err := store.ListRemotes(ctx)
 			_ = store.Close()
@@ -268,14 +287,43 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 		}
 	}
 
-	return federationRemotesAPICheck(serverState, remotesAPIPort, sharedMode)
+	return federationRemotesAPICheck(serverState, target.RemotesAPIPort, target.SharedMode)
 }
 
-func federationRemotesAPITarget(beadsDir string) (sharedMode bool, serverDir string, remotesAPIPort int) {
-	sharedMode = doltserver.IsSharedServerModeForDir(beadsDir)
-	serverDir = doltserver.ResolveServerDirForTarget(beadsDir)
-	remotesAPIPort = doltserver.ResolveRemotesAPIPortForMode(beadsDir, sharedMode)
-	return sharedMode, serverDir, remotesAPIPort
+type federationRemotesAPITarget struct {
+	SharedMode     bool
+	DoltPath       string
+	ServerDir      string
+	SQLConfig      *dolt.Config
+	RemotesAPIPort int
+}
+
+func resolveFederationRemotesAPITarget(beadsDir string) (federationRemotesAPITarget, error) {
+	sharedMode := doltserver.IsSharedServerModeForDir(beadsDir)
+	doltPath := getDatabasePath(beadsDir)
+	serverDir := beadsDir
+	if sharedMode {
+		var err error
+		doltPath, err = doltserver.SharedDoltPath()
+		if err != nil {
+			return federationRemotesAPITarget{}, fmt.Errorf("resolving shared Dolt path: %w", err)
+		}
+		serverDir, err = doltserver.SharedServerPath()
+		if err != nil {
+			return federationRemotesAPITarget{}, fmt.Errorf("resolving shared server path: %w", err)
+		}
+	}
+	resolvedServer := doltserver.DefaultConfigForMode(beadsDir, sharedMode)
+	sqlConfig := doltServerConfigForTarget(beadsDir, doltPath, resolvedServer, sharedMode)
+	sqlConfig.AutoStart = false
+	sqlConfig.DisableAutoStart = true
+	return federationRemotesAPITarget{
+		SharedMode:     sharedMode,
+		DoltPath:       doltPath,
+		ServerDir:      serverDir,
+		SQLConfig:      sqlConfig,
+		RemotesAPIPort: doltserver.ResolveRemotesAPIPortForMode(beadsDir, sharedMode),
+	}, nil
 }
 
 func federationRemotesAPICheck(serverState *doltserver.State, remotesAPIPort int, sharedMode bool) DoctorCheck {
