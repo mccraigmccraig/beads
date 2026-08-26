@@ -991,6 +991,17 @@ func ResolveRemotesAPIPortForMode(beadsDir string, sharedMode bool) int {
 	return configfile.DefaultDoltRemotesAPIPort
 }
 
+func checkRemotesAPIPortAvailable(port int) error {
+	if port <= 0 {
+		return nil
+	}
+	listener, err := net.Listen("tcp", net.JoinHostPort("", strconv.Itoa(port)))
+	if err != nil {
+		return fmt.Errorf("configured remotesapi port %d is unavailable: %w", port, err)
+	}
+	return listener.Close()
+}
+
 // ProbeRemotesAPI reports whether a local remotesapi listener accepts TCP
 // connections. Unlike ProbeSQLServer there is no MySQL greeting to drain.
 func ProbeRemotesAPI(port int) bool {
@@ -1492,6 +1503,18 @@ func releaseLifecycleLock(lockF *os.File) {
 	_ = lockF.Close()
 }
 
+func verifyRemotesAPIState(cfg *Config, state *State) (*State, error) {
+	state.RemotesAPIPort = cfg.RemotesAPIPort
+	if cfg.RemotesAPIPort > 0 && !ProbeRemotesAPI(cfg.RemotesAPIPort) {
+		return nil, fmt.Errorf(
+			"Dolt server is running on SQL port %d, but configured remotesapi port %d is not reachable; run 'bd dolt restart' to apply the shared-server setting",
+			state.Port,
+			cfg.RemotesAPIPort,
+		)
+	}
+	return state, nil
+}
+
 // Start explicitly starts a dolt sql-server for the project.
 // Returns the State of the started server, or an error.
 func Start(beadsDir string) (*State, error) {
@@ -1507,9 +1530,10 @@ func startLocked(beadsDir string) (*State, error) {
 	cfg := DefaultConfig(beadsDir)
 	doltDir := ResolveDoltDir(beadsDir)
 
-	// Re-check after acquiring the lifecycle lock.
+	// Re-check after acquiring the lifecycle lock. A tracked process is only a
+	// successful start when every configured listener is ready.
 	if state, _ := IsRunning(beadsDir); state != nil && state.Running {
-		return state, nil
+		return verifyRemotesAPIState(cfg, state)
 	}
 
 	// Clean up orphaned dolt sql-server processes INSIDE the lock.
@@ -1609,10 +1633,20 @@ func startLocked(beadsDir string) (*State, error) {
 			}
 			if adoptPID > 0 {
 				_ = logFile.Close()
-				_ = os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(adoptPID)), 0600)
+				_ = os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(adoptPID)), 0o600)
 				_ = writePortFile(beadsDir, actualPort)
-				return &State{Running: true, PID: adoptPID, Port: actualPort, DataDir: doltDir}, nil
+				return verifyRemotesAPIState(cfg, &State{
+					Running:        true,
+					PID:            adoptPID,
+					Port:           actualPort,
+					RemotesAPIPort: cfg.RemotesAPIPort,
+					DataDir:        doltDir,
+				})
 			}
+		}
+		if err := checkRemotesAPIPortAvailable(cfg.RemotesAPIPort); err != nil {
+			_ = logFile.Close()
+			return nil, err
 		}
 
 		// Start dolt sql-server, with retry loop for ephemeral port TOCTOU.
@@ -1922,7 +1956,7 @@ func Restart(beadsDir string) (*State, error) {
 	if state, stateErr := IsRunning(beadsDir); stateErr == nil && state != nil {
 		previousPort = state.Port
 	}
-	if err := stopLocked(beadsDir); err != nil && !errors.Is(err, ErrServerNotRunning) {
+	if err := IgnoreNotRunning(stopLocked(beadsDir)); err != nil {
 		return nil, fmt.Errorf("stopping Dolt server for restart: %w", err)
 	}
 	if previousPort > 0 {
@@ -1947,17 +1981,14 @@ func Restart(beadsDir string) (*State, error) {
 
 // StopWithForce is like Stop but with an optional force flag.
 func StopWithForce(beadsDir string, force bool) error {
-	// Preserve the established idempotent stopped contract (including
-	// ErrServerNotRunning joined with cleanup errors) without requiring a new
-	// lock file in a directory that may itself be unwritable.
-	if state, err := IsRunning(beadsDir); err != nil {
-		return err
-	} else if state == nil || !state.Running {
-		return stopLocked(beadsDir)
-	}
-
 	lockF, err := acquireLifecycleLock(beadsDir)
 	if err != nil {
+		// Preserve the established idempotent stopped contract when the state
+		// directory itself is unwritable. A live server is never stopped
+		// outside the lock.
+		if state, stateErr := IsRunning(beadsDir); stateErr == nil && (state == nil || !state.Running) {
+			return stopLocked(beadsDir)
+		}
 		return err
 	}
 	defer releaseLifecycleLock(lockF)

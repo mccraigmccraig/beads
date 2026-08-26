@@ -17,6 +17,8 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/config"
+
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil/integration"
@@ -29,6 +31,12 @@ func setupLifecycleTestDir(t *testing.T) string {
 	doltBin := integration.RequireDolt(t)
 
 	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, ".config"))
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+
 	configureDoltTestIdentity(t, doltBin, tmpDir)
 
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -84,6 +92,24 @@ func connectMySQL(t *testing.T, port int) *sql.DB {
 		t.Fatalf("sql.Open: %v", err)
 	}
 	return db
+}
+
+func reserveDistinctTCPPorts(t *testing.T, count int) []int {
+	t.Helper()
+	listeners := make([]net.Listener, 0, count)
+	ports := make([]int, 0, count)
+	for range count {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		listeners = append(listeners, listener)
+		ports = append(ports, listener.Addr().(*net.TCPAddr).Port)
+	}
+	for _, listener := range listeners {
+		_ = listener.Close()
+	}
+	return ports
 }
 
 func waitForPortClosed(t *testing.T, port int, timeout time.Duration) {
@@ -506,17 +532,8 @@ func TestLifecycle_RestartWithRemotesAPI(t *testing.T) {
 	diag := integration.NewDiagnostics(t, beadsDir)
 	diag.CaptureOnFailure()
 
-	freePort := func() int {
-		t.Helper()
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		port := ln.Addr().(*net.TCPAddr).Port
-		_ = ln.Close()
-		return port
-	}
-	sqlPort, rapiPort := freePort(), freePort()
+	ports := reserveDistinctTCPPorts(t, 2)
+	sqlPort, rapiPort := ports[0], ports[1]
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
 	t.Setenv("BEADS_SHARED_SERVER_DIR", beadsDir)
 	t.Setenv("BEADS_DOLT_SERVER_PORT", fmt.Sprintf("%d", sqlPort))
@@ -606,6 +623,80 @@ func TestLifecycle_RestartWithRemotesAPI(t *testing.T) {
 	reg.Deregister(second.PID)
 }
 
+func TestLifecycle_StartRequiresRestartForNewRemotesAPIConfig(t *testing.T) {
+	beadsDir := setupLifecycleTestDir(t)
+	reg := integration.NewProcessRegistry(t)
+	ports := reserveDistinctTCPPorts(t, 2)
+	sqlPort, rapiPort := ports[0], ports[1]
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", beadsDir)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", fmt.Sprintf("%d", sqlPort))
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "0")
+
+	state, err := doltserver.Start(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proc, findErr := os.FindProcess(state.PID); findErr == nil {
+		reg.Register(proc)
+	}
+
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", fmt.Sprintf("%d", rapiPort))
+	if _, err := doltserver.Start(beadsDir); err == nil || !strings.Contains(err.Error(), "bd dolt restart") {
+		t.Fatalf("Start after remotesapi config = %v, want actionable restart-required error", err)
+	}
+	if err := doltserver.Stop(beadsDir); err != nil {
+		t.Fatal(err)
+	}
+	reg.Deregister(state.PID)
+}
+
+func TestLifecycle_AdoptedServerRequiresConfiguredRemotesAPI(t *testing.T) {
+	beadsDir := setupLifecycleTestDir(t)
+	physicalBeadsDir, err := filepath.EvalSymlinks(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beadsDir = physicalBeadsDir
+	reg := integration.NewProcessRegistry(t)
+	ports := reserveDistinctTCPPorts(t, 2)
+	sqlPort, rapiPort := ports[0], ports[1]
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", beadsDir)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", fmt.Sprintf("%d", sqlPort))
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "0")
+
+	first, err := doltserver.Start(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proc, findErr := os.FindProcess(first.PID); findErr == nil {
+		reg.Register(proc)
+	}
+	if err := os.Remove(filepath.Join(beadsDir, doltserver.PIDFileName)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(beadsDir, doltserver.PortFileName)); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", fmt.Sprintf("%d", rapiPort))
+	if _, err := doltserver.Start(beadsDir); err == nil || !strings.Contains(err.Error(), "bd dolt restart") {
+		t.Fatalf("adopted Start = %v, want actionable restart-required error", err)
+	}
+	state, err := doltserver.IsRunning(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Running || state.PID != first.PID || state.RemotesAPIPort != rapiPort {
+		t.Fatalf("adopted state = %+v, want PID %d and configured remotesapi %d", state, first.PID, rapiPort)
+	}
+	if err := doltserver.Stop(beadsDir); err != nil {
+		t.Fatal(err)
+	}
+	reg.Deregister(first.PID)
+}
+
 func TestLifecycle_RestartRemotesAPIFailureLeavesCleanStoppedState(t *testing.T) {
 	beadsDir := setupLifecycleTestDir(t)
 	reg := integration.NewProcessRegistry(t)
@@ -617,8 +708,20 @@ func TestLifecycle_RestartRemotesAPIFailureLeavesCleanStoppedState(t *testing.T)
 		t.Fatal(err)
 	}
 	sqlPort := sqlListener.Addr().(*net.TCPAddr).Port
+	var blocker net.Listener
+	for {
+		blocker, err = net.Listen("tcp6", "[::]:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if blocker.Addr().(*net.TCPAddr).Port != sqlPort {
+			break
+		}
+		_ = blocker.Close()
+	}
+	defer blocker.Close()
+	blockedRAPIPort := blocker.Addr().(*net.TCPAddr).Port
 	_ = sqlListener.Close()
-
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
 	t.Setenv("BEADS_SHARED_SERVER_DIR", beadsDir)
 	t.Setenv("BEADS_DOLT_SERVER_PORT", fmt.Sprintf("%d", sqlPort))
@@ -632,12 +735,6 @@ func TestLifecycle_RestartRemotesAPIFailureLeavesCleanStoppedState(t *testing.T)
 		reg.Register(proc)
 	}
 
-	blocker, err := net.Listen("tcp6", "[::]:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer blocker.Close()
-	blockedRAPIPort := blocker.Addr().(*net.TCPAddr).Port
 	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", fmt.Sprintf("%d", blockedRAPIPort))
 
 	_, restartErr := doltserver.Restart(beadsDir)
@@ -645,7 +742,7 @@ func TestLifecycle_RestartRemotesAPIFailureLeavesCleanStoppedState(t *testing.T)
 		t.Fatal("Restart succeeded with occupied remotesapi port")
 	}
 	reg.Deregister(first.PID)
-	for _, want := range []string{"server remains stopped", doltserver.LogPath(beadsDir)} {
+	for _, want := range []string{"server remains stopped", "remotesapi", doltserver.LogPath(beadsDir)} {
 		if !strings.Contains(restartErr.Error(), want) {
 			t.Fatalf("Restart error %q missing %q", restartErr, want)
 		}

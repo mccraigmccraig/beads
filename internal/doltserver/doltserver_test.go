@@ -758,6 +758,33 @@ func TestStopNoStateFiles(t *testing.T) {
 	}
 }
 
+func TestStopWaitsForLifecycleLockWhenStopped(t *testing.T) {
+	dir := t.TempDir()
+	lockF, err := acquireLifecycleLock(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- Stop(dir) }()
+	select {
+	case err := <-done:
+		releaseLifecycleLock(lockF)
+		t.Fatalf("Stop returned while lifecycle lock was held: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	releaseLifecycleLock(lockF)
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrServerNotRunning) {
+			t.Fatalf("Stop after lock release = %v, want ErrServerNotRunning", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not resume after lifecycle lock release")
+	}
+}
+
 // TestStopNotRunningWithCleanupError verifies that Stop returns both the
 // sentinel and cleanup errors when the server is not running but state
 // files can't be removed.
@@ -784,6 +811,31 @@ func TestStopNotRunningWithCleanupError(t *testing.T) {
 	remaining := IgnoreNotRunning(err)
 	if remaining == nil {
 		t.Error("expected cleanup error to be preserved, got nil")
+	}
+}
+
+func TestRestartPreservesStoppedCleanupError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod not effective on Windows")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(lockPath(dir), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pidPath(dir), []byte("999999999"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	_, err := Restart(dir)
+	if err == nil {
+		t.Fatal("Restart succeeded despite stale-state cleanup failure")
+	}
+	if !strings.Contains(err.Error(), "stopping Dolt server for restart") {
+		t.Fatalf("Restart error = %v, want preserved stop cleanup failure", err)
 	}
 }
 
@@ -2202,6 +2254,27 @@ func TestBuildDoltServerArgs_RemotesAPI(t *testing.T) {
 	idx := indexOf(args, "--remotesapi-port")
 	if idx < 0 || idx+1 >= len(args) || args[idx+1] != "8081" {
 		t.Fatalf("configured remotesapi flag missing or wrong: %v", args)
+	}
+}
+
+func TestVerifyRemotesAPIState(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	state := &State{Running: true, PID: 42, Port: 3308}
+	got, err := verifyRemotesAPIState(&Config{RemotesAPIPort: port}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RemotesAPIPort != port {
+		t.Fatalf("state remotesapi port = %d, want %d", got.RemotesAPIPort, port)
+	}
+	_ = listener.Close()
+	if _, err := verifyRemotesAPIState(&Config{RemotesAPIPort: port}, state); err == nil ||
+		!strings.Contains(err.Error(), "bd dolt restart") {
+		t.Fatalf("unreachable remotesapi verification = %v, want restart-required error", err)
 	}
 }
 
