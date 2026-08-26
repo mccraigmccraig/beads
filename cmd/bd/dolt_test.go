@@ -936,12 +936,12 @@ func TestDoltPushPullCommitNeedStore(t *testing.T) {
 }
 
 // TestDoltConfigSubcommandsSkipStore verifies that dolt config/diagnostic
-// subcommands (show, set, test, start, stop, status) don't require the store.
-// These commands manage their own config loading and should work without
+// subcommands (show, set, test, start, restart, stop, status) don't require the
+// store. These commands manage their own config loading and should work without
 // PersistentPreRun's store initialization.
 func TestDoltConfigSubcommandsSkipStore(t *testing.T) {
-	// Verify these are registered as children of doltCmd
-	configSubcommands := []string{"show", "set", "test", "start", "stop", "status"}
+	// Verify these are registered as children of doltCmd.
+	configSubcommands := []string{"show", "set", "test", "start", "restart", "stop", "status"}
 	for _, name := range configSubcommands {
 		found := false
 		for _, cmd := range doltCmd.Commands() {
@@ -968,6 +968,70 @@ func TestDoltConfigSubcommandsSkipStore(t *testing.T) {
 		if !found {
 			t.Errorf("expected dolt subcommand %q to be registered", name)
 		}
+	}
+}
+
+func TestDoltRestartModeValidation(t *testing.T) {
+	local := &configfile.Config{DoltServerHost: "127.0.0.1"}
+	remote := &configfile.Config{DoltServerHost: "db.example.com"}
+	tests := []struct {
+		name      string
+		cfg       *configfile.Config
+		sqlServer bool
+		proxied   bool
+		want      string
+	}{
+		{name: "embedded", cfg: local, want: "embedded mode"},
+		{name: "proxied", cfg: local, sqlServer: true, proxied: true, want: "proxied-server mode"},
+		{name: "remote", cfg: remote, sqlServer: true, want: "remote"},
+		{name: "local managed", cfg: local, sqlServer: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateDoltRestartMode(tt.cfg, tt.sqlServer, tt.proxied)
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("validation error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("validation error = %v, want containing %q", err, tt.want)
+			}
+		})
+	}
+	if !strings.Contains(doltRestartCmd.Long, "auto-start is disabled") {
+		t.Fatalf("restart help must document explicit lifecycle policy:\n%s", doltRestartCmd.Long)
+	}
+}
+
+func TestRenderDoltRestartResult(t *testing.T) {
+	state := &doltserver.State{
+		Running:        true,
+		PID:            42,
+		Port:           3308,
+		RemotesAPIPort: 8080,
+		DataDir:        "/tmp/shared/dolt",
+	}
+	jsonOutput = false
+	text := captureStdout(t, func() error { return renderDoltRestartResult(state) })
+	for _, want := range []string{"PID 42", "port 3308", "RemotesAPI: 8080", "/tmp/shared/dolt"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("restart text missing %q:\n%s", want, text)
+		}
+	}
+
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = false })
+	raw := captureStdout(t, func() error { return renderDoltRestartResult(state) })
+	var result map[string]any
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		t.Fatalf("decode restart JSON: %v\n%s", err, raw)
+	}
+	if result["restarted"] != true ||
+		int(result["port"].(float64)) != 3308 ||
+		int(result["remotesapi_port"].(float64)) != 8080 {
+		t.Fatalf("restart JSON = %v", result)
 	}
 }
 

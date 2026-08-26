@@ -557,12 +557,6 @@ func TestLifecycle_RestartWithRemotesAPI(t *testing.T) {
 	if _, err := db.Exec("INSERT INTO restart_probe VALUES (1)"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("CALL DOLT_ADD('-A')"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec("CALL DOLT_COMMIT('-m', 'restart probe')"); err != nil {
-		t.Fatal(err)
-	}
 	_ = db.Close()
 
 	second, err := doltserver.Restart(beadsDir)
@@ -581,13 +575,16 @@ func TestLifecycle_RestartWithRemotesAPI(t *testing.T) {
 	}
 
 	db = connectMySQL(t, sqlPort)
-	var count int
+	var count, dirty int
 	if err := db.QueryRow("SELECT COUNT(*) FROM restart_probe").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM dolt_status").Scan(&dirty); err != nil {
+		t.Fatal(err)
+	}
 	_ = db.Close()
-	if count != 1 {
-		t.Fatalf("restart_probe count = %d, want 1", count)
+	if count != 1 || dirty != 0 {
+		t.Fatalf("post-restart state: restart_probe count=%d dolt_status rows=%d, want 1/0 (flush committed before stop)", count, dirty)
 	}
 
 	const starters = 4

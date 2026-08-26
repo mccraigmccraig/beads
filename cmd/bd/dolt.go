@@ -858,6 +858,37 @@ is running and 'bd dolt stop' to shut it down.`,
 	},
 }
 
+func validateDoltRestartMode(fileCfg *configfile.Config, sqlServer, proxied bool) error {
+	if !sqlServer {
+		return errors.New("'bd dolt restart' is not supported in embedded mode (no Dolt server)")
+	}
+	if proxied {
+		return errors.New("'bd dolt restart' does not manage proxied-server mode; use 'bd dolt stop' and let the proxy restart on the next command")
+	}
+	if host := fileCfg.GetDoltServerHost(); !configfile.IsLocalHostString(host) {
+		return fmt.Errorf("the configured Dolt server host is remote (%s); 'bd dolt restart' only manages a local server", host)
+	}
+	return nil
+}
+
+func renderDoltRestartResult(state *doltserver.State) error {
+	if jsonOutput {
+		return outputJSON(map[string]interface{}{
+			"restarted":       true,
+			"pid":             state.PID,
+			"port":            state.Port,
+			"remotesapi_port": state.RemotesAPIPort,
+			"data_dir":        state.DataDir,
+		})
+	}
+	fmt.Printf("Dolt server restarted (PID %d, port %d)\n", state.PID, state.Port)
+	if state.RemotesAPIPort > 0 {
+		fmt.Printf("  RemotesAPI: %d\n", state.RemotesAPIPort)
+	}
+	fmt.Printf("  Data: %s\n", state.DataDir)
+	return nil
+}
+
 var doltRestartCmd = &cobra.Command{
 	Use:           "restart",
 	SilenceUsage:  true,
@@ -867,7 +898,9 @@ var doltRestartCmd = &cobra.Command{
 
 The lifecycle lock is held across the complete stop/start transition, excluding
 concurrent auto-starts. The existing SQL port is preserved and the command
-returns only after SQL and any configured remotesapi listener are ready.`,
+returns only after SQL and any configured remotesapi listener are ready.
+As an explicit operator action, restart remains available when transparent
+auto-start is disabled.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
@@ -877,26 +910,15 @@ returns only after SQL and any configured remotesapi listener are ready.`,
 		if err != nil {
 			return HandleError("%v", err)
 		}
-		if !usesSQLServer() {
-			return HandleError("'bd dolt restart' is not supported in embedded mode (no Dolt server)")
-		}
-		if usesProxiedServer() {
-			return HandleError("'bd dolt restart' does not manage proxied-server mode; use 'bd dolt stop' and let the proxy restart on the next command")
-		}
-		if host := fileCfg.GetDoltServerHost(); !configfile.IsLocalHostString(host) {
-			return HandleError("the configured Dolt server host is remote (%s); 'bd dolt restart' only manages a local server", host)
+		if err := validateDoltRestartMode(fileCfg, usesSQLServer(), usesProxiedServer()); err != nil {
+			return HandleError("%v", err)
 		}
 		serverDir := doltserver.ResolveServerDir(beadsDir)
 		state, err := doltserver.Restart(serverDir)
 		if err != nil {
 			return HandleError("%v", err)
 		}
-		fmt.Printf("Dolt server restarted (PID %d, port %d)\n", state.PID, state.Port)
-		if state.RemotesAPIPort > 0 {
-			fmt.Printf("  RemotesAPI: %d\n", state.RemotesAPIPort)
-		}
-		fmt.Printf("  Data: %s\n", state.DataDir)
-		return nil
+		return renderDoltRestartResult(state)
 	},
 }
 

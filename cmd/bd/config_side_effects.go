@@ -26,25 +26,31 @@ func checkConfigSetSideEffects(key, value string) []configSideEffect {
 	case key == "dolt.shared-server" && strings.EqualFold(value, "true"):
 		effects = append(effects, configSideEffect{
 			Message: "Shared server mode enabled. Start the server to activate.",
-			Command: "bd dolt server start",
+			Command: "bd dolt start",
 		})
 
 	case key == "dolt.shared-server" && !strings.EqualFold(value, "true"):
 		effects = append(effects, configSideEffect{
 			Message: "Shared server mode disabled. Stop any running server if no longer needed.",
-			Command: "bd dolt server stop",
+			Command: "bd dolt stop",
 		})
 
 	case key == "dolt.debug" && strings.EqualFold(value, "true"):
 		effects = append(effects, configSideEffect{
 			Message: "Debug mode will apply on the next Dolt server start (loglevel=debug, --prof cpu).",
-			Command: "bd dolt stop && bd dolt start",
+			Command: "bd dolt restart",
 		})
 
 	case key == "dolt.debug" && !strings.EqualFold(value, "true"):
 		effects = append(effects, configSideEffect{
 			Message: "Debug mode disabled. Restart the server to drop --prof and --loglevel=debug.",
-			Command: "bd dolt stop && bd dolt start",
+			Command: "bd dolt restart",
+		})
+
+	case key == "dolt.remotesapi-port":
+		effects = append(effects, configSideEffect{
+			Message: "RemotesAPI port updated. Restart the shared Dolt server to apply it.",
+			Command: "bd dolt restart",
 		})
 
 	case key == "routing.mode":
@@ -84,13 +90,13 @@ func checkConfigUnsetSideEffects(key string) []configSideEffect {
 	case "dolt.shared-server":
 		effects = append(effects, configSideEffect{
 			Message: "Shared server config removed. Stop any running server if no longer needed.",
-			Command: "bd dolt server stop",
+			Command: "bd dolt stop",
 		})
 
 	case "dolt.debug":
 		effects = append(effects, configSideEffect{
 			Message: "Debug config removed. Restart the server to drop --prof and --loglevel=debug.",
-			Command: "bd dolt stop && bd dolt start",
+			Command: "bd dolt restart",
 		})
 
 	case "backup.enabled":

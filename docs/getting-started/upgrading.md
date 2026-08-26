@@ -119,7 +119,7 @@ bd hooks install
 bd info  # Shows warnings if hooks are outdated
 
 # 4. If using Dolt backend, restart the server
-bd dolt stop && bd dolt start
+bd dolt restart
 ```
 
 **Why update hooks?** Git hooks are versioned with bd. Outdated hooks may miss export refresh, legacy fallback, or safety fixes.
