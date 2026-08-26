@@ -1553,6 +1553,9 @@ func TestIsSharedServerModeForDirPrecedence(t *testing.T) {
 		if IsSharedServerModeForDir(targetDir) {
 			t.Fatal("explicit target shared-server=false must override active workspace true")
 		}
+		if got := DefaultConfigForMode(targetDir, false).Mode; got != ServerModeOwned {
+			t.Fatalf("explicit non-shared target mode = %s, want owned despite active shared workspace", got)
+		}
 	})
 
 	t.Run("target true overrides active workspace", func(t *testing.T) {
@@ -1567,6 +1570,9 @@ func TestIsSharedServerModeForDirPrecedence(t *testing.T) {
 		}
 		if !IsSharedServerModeForDir(targetDir) {
 			t.Fatal("explicit target shared-server=true must override active workspace false")
+		}
+		if got := DefaultConfigForMode(targetDir, true).Mode; got != ServerModeExternal {
+			t.Fatalf("explicit shared target mode = %s, want external despite active non-shared workspace", got)
 		}
 	})
 }

@@ -98,6 +98,7 @@ func TestResolveFederationRemotesAPITargetUsesTargetPaths(t *testing.T) {
 		nonShared.DoltPath != wantNonSharedData ||
 		nonShared.ServerDir != nonSharedDir ||
 		nonShared.SQLConfig.ServerPort != 15555 ||
+		nonShared.SQLConfig.ServerPortSource != doltserver.PortSourceMetadataJSON ||
 		nonShared.SQLConfig.ServerPortSharedServer ||
 		nonShared.RemotesAPIPort != 7001 {
 		t.Fatalf("non-shared target = %+v, want data:%q state:%q sql:15555 shared-provenance:false rapi:7001", nonShared, wantNonSharedData, nonSharedDir)
@@ -121,6 +122,7 @@ func TestResolveFederationRemotesAPITargetUsesTargetPaths(t *testing.T) {
 		shared.DoltPath != filepath.Join(sharedRoot, "dolt") ||
 		shared.ServerDir != sharedRoot ||
 		shared.SQLConfig.ServerPort != doltserver.DefaultSharedServerPort ||
+		shared.SQLConfig.ServerPortSource != doltserver.PortSourceSharedServerDefault ||
 		!shared.SQLConfig.ServerPortSharedServer ||
 		shared.RemotesAPIPort != 8123 {
 		t.Fatalf("shared target = %+v, want data:%q state:%q sql:%d shared-provenance:true rapi:8123", shared, filepath.Join(sharedRoot, "dolt"), sharedRoot, doltserver.DefaultSharedServerPort)

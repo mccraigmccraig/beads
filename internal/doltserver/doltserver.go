@@ -1042,10 +1042,7 @@ func defaultConfigForMode(beadsDir string, sharedMode bool, resolvePort serverPo
 		}
 	}
 
-	mode := ResolveServerMode(workspaceBeadsDir)
-	if sharedMode {
-		mode = ServerModeExternal
-	}
+	mode := ResolveServerModeForMode(workspaceBeadsDir, sharedMode)
 	cfg := &Config{
 		BeadsDir: beadsDir,
 		Host:     "127.0.0.1",
