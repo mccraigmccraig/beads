@@ -411,6 +411,17 @@ which dumps the entire release history.)
 
 ### Added
 
+- **Managed shared Dolt servers can expose remotesapi through `bd`.**
+  `bd dolt set remotesapi-port <port>` stores one machine-global setting
+  (disabled by default), and `bd dolt restart` applies it under a single
+  lifecycle lock while preserving the SQL port and waiting for both listeners.
+  `bd dolt show`, `bd dolt status`, and `bd doctor` report the same effective
+  endpoint and distinguish disabled, unreachable, and ready states. Restart
+  flushes pending working-set changes, excludes concurrent transparent starts,
+  and leaves clean, retryable state on listener failures. Current Dolt releases
+  bind remotesapi on all interfaces; deployments must enforce network access
+  until Dolt provides a remotesapi bind-address option.
+
 - **The events journal records WHO performed each mutation.** `bd_events_journal`
   gains an `actor` column (migration 0066 plus its ignored-series twin 0025, so
   upgraded workspaces and fresh clones converge on the same shape), stamped
